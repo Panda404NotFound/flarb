@@ -1,0 +1,8 @@
+..
+.cursorignore
+target/
+.env
+help.txt
+node_modules/
+package-lock.json
+Cargo.lock
