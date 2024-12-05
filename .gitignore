@@ -1,8 +1,12 @@
 ..
 .cursorignore
+.cursorrules
 target/
 .env
 help.txt
-node_modules/
 package-lock.json
 Cargo.lock
+markets/orca_pools.json
+markets/raydium_pools.json
+markets/tokens.json
+markets/pools.json
