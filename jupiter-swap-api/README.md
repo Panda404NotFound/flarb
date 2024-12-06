@@ -13,9 +13,9 @@ curl -s "https://cache.jup.ag/markets?v=3" > ./cache/markets.json
 docker run -d \
   --restart unless-stopped \
   --name jupiter-swap-api \
-  --cpus=8 \
-  --memory=16g \ 
-  --memory-swap=32g \
+  --cpus=2 \
+  --memory=2g \ 
+  --memory-swap=4g \
   -p 8080:8080 \
   -e RUST_LOG=info \
   -e RPC_URL="https://mainnet.helius-rpc.com/" \

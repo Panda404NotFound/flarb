@@ -4,6 +4,7 @@ use std::str::FromStr;
 use solana_program::pubkey::Pubkey;
 
 /// Структура для хранения информации о пуле Orca
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct OrcaPool {
     /// Адрес пула - JSON: address
@@ -22,6 +23,7 @@ pub struct OrcaPool {
     pub fee_rate: f64,
 }
 
+#[allow(dead_code)]
 impl OrcaPool {
     /// Создает новый экземпляр пула из предоставленных данных
     pub fn new(

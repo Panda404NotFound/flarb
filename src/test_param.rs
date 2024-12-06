@@ -73,6 +73,7 @@ use solana_program::pubkey::Pubkey;
 use std::str::FromStr;
 
 // Общие параметры для DEX
+#[allow(dead_code)]
 pub struct TestDexParams {
     pub slippage_bps: u64,
     pub amount_in: u64,
@@ -80,6 +81,7 @@ pub struct TestDexParams {
 }
 
 // Специфичные параметры Orca
+#[allow(dead_code)]
 pub struct TestOrcaDexConfig {
     pub pool_address: Pubkey,
     pub params: TestDexParams,
@@ -87,6 +89,7 @@ pub struct TestOrcaDexConfig {
 }
 
 // Специфичные параметры Raydium
+#[allow(dead_code)]
 pub struct TestRaydiumDexConfig {
     pub pool_id: Pubkey,
     pub amm_config: Pubkey,
@@ -99,6 +102,7 @@ pub struct TestPoolConfig {
     pub raydium: TestRaydiumDexConfig,
     pub usdc_mint: Pubkey,
     pub sol_mint: Pubkey,
+    pub client: &'static reqwest::Client,
 }
 
 impl Default for TestPoolConfig {
@@ -117,6 +121,7 @@ impl Default for TestPoolConfig {
         };
 
         Self {
+            client: crate::config::initialize_http_client(),
             orca: TestOrcaDexConfig {
                 // Адрес пула Orca SOL/USDC
                 pool_address: Pubkey::from_str("Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE")
@@ -141,6 +146,7 @@ impl Default for TestPoolConfig {
     }
 }
 
+#[allow(dead_code)]
 impl TestPoolConfig {
     // Вспомогательные методы для получения параметров
     pub fn get_orca_params(&self) -> &TestDexParams {

@@ -23,7 +23,7 @@ log = "0.4.20"
 tracing = "0.1.39"
 env_logger = "0.11.4"
 
-reqwest = "0.12.5"
+reqwest = { version = "0.12.5", features = ["default-tls"] }
 serde = { version = "1.0.192", features = ["derive"] }
 
 helius = "0.2.2"

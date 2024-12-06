@@ -4,6 +4,7 @@ use std::str::FromStr;
 use solana_program::pubkey::Pubkey;
 
 /// Структура для хранения информации о пуле Raydium
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct RaydiumPool {
     /// ID пула - JSON: id
@@ -24,6 +25,7 @@ pub struct RaydiumPool {
     pub trade_fee_rate: f64,
 }
 
+#[allow(dead_code)]
 impl RaydiumPool {
     /// Создает новый экземпляр пула из предоставленных данных
     pub fn new(

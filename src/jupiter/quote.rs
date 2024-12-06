@@ -11,18 +11,19 @@ use log::{info, debug};
 pub async fn test_valid_pools() -> JupiterResult<()> {
     let start_time = Instant::now();
 
-    // Устанавливаем переменную окружения для локального хоста 
-    // и формируем URL для локального API
+    let config = TestPoolConfig::default();
+    let orca_params = config.get_orca_params();
+    
+    // Устанавливаем URL для локального Jupiter API и инициализируем клиент
     let base_url = env::var("LOCAL_API_HOST")
         .unwrap_or_else(|_| "http://localhost:8080".to_string());
     env::set_var("QUOTE_API_URL", &base_url);
     
-    let config = TestPoolConfig::default();
-    let orca_params = config.get_orca_params();
+    // Используем уже инициализированный клиент из config
+    let _client = config.client;
     
     debug!("Отправляем запрос к локальному Jupiter API");
 
-    // Используем готовый метод из jup-ag
     let orca_quote = quote(
         config.sol_mint,
         config.usdc_mint,

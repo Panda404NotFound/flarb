@@ -1,0 +1,6 @@
+2024-12-06T04:04:08.630997Z  WARN jupiter_common::client_extension: Error on request getLatestBlockhash from rpc_url https://mainnet.helius-rpc.com/: Error { request: Some(GetLatestBlockhash), kind: Reqwest(reqwest::Error { kind: Request, url: Url { scheme: "https", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("mainnet.helius-rpc.com")), port: None, path: "/", query: Some("api-key="), fragment: None }, source: TimedOut }) }
+2024-12-06T04:04:08.631340Z  WARN jupiter_core::swap_transaction::blockhash_provider: blockhash fetch failed: All requests failed after retries
+
+Stack backtrace:
+   0: <unknown>
+   1: <unknown>
