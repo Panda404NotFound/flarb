@@ -1,8 +1,18 @@
 // main.rs
 mod macros;
 mod config;
+mod jupiter;
+mod test_param;
+
+use log::info;
+use jupiter::quote::test_valid_pools;
 
 #[tokio::main]
-async fn main() {
-    println!("Hello, world!");
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+
+    env_logger::init();
+    info!("Testing Jupiter Pools...");
+    test_valid_pools().await?;
+    Ok(())
+
 }

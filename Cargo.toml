@@ -13,10 +13,26 @@ members = ["."]
 path = "src/lib.rs"
 
 [package.metadata.membership]
-include = ["**/*.rs"]
+include = ["src/**/*.rs"]
 auto-export = true
+exclude = []
+reexport = true
 
 [dependencies]
+log = "0.4.20"
+tracing = "0.1.39"
+env_logger = "0.11.4"
+
+reqwest = "0.12.5"
+serde = { version = "1.0.192", features = ["derive"] }
+
 helius = "0.2.2"
 jup-ag = { version = "0.8.0" }
+
+# jupiter-swap-api-client = { git = "https://github.com/jup-ag/jupiter-swap-api-client.git", package = "jupiter-swap-api-client"}
+
+
+solana-program = "=1.10.0" # Требование для jup-ag
+solana-sdk = "2.1.4"
+
 tokio = { version = "1.36.0", features = ["full"] }
