@@ -1,0 +1,14 @@
+ДЛЯ МАКОС ИЛИ ЛИНУКС:
+
+docker image list
+
+Если
+
+Cannot connect to the Docker daemon at unix:///Users/a1111/.docker/run/docker.sock. Is the docker daemon running?
+
+то выводи логирования и ожидать enter для продолжения 
+
+после enter проверяем еще раз и если мы находим ghcr.io/jup-ag/jupiter-swap-api то продолжаем логику. 
+
+Затем вводим docker ps -a и если находим контейнер id у которого есть «ghcr.io/jup-ag/jupiter-swap-api» (парсить только эти слова, потому что могут быть другие версии и так далее, но общее слово остается и если оно есть значит валидно) то grab этот контейнер имя (например из логирования «CONTAINER ID   IMAGE                                     COMMAND                CREATED        STATUS                      PORTS     NAMES
+9b0a6829428f   ghcr.io/jup-ag/jupiter-swap-api:v6.0.34   "./jupiter-swap-api"   29 hours ago   Exited (137) 29 hours ago             jupiter-swap-api»), чтобы запустить его docker start. 

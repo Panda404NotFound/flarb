@@ -102,7 +102,6 @@ pub struct TestPoolConfig {
     pub raydium: TestRaydiumDexConfig,
     pub usdc_mint: Pubkey,
     pub sol_mint: Pubkey,
-    pub client: &'static reqwest::Client,
 }
 
 impl Default for TestPoolConfig {
@@ -110,7 +109,7 @@ impl Default for TestPoolConfig {
         // Базовые параметры для обеих DEX
         let orca_params = TestDexParams {
             slippage_bps: 50,  // 0.5%
-            amount_in: 1_000_000_000,  // 1 SOL (9 decimals)
+            amount_in: 100_000_000_000,  // 1 SOL (9 decimals)
             amount_out: 1_000_000,     // 1 USDC (6 decimals)
         };
 
@@ -121,7 +120,6 @@ impl Default for TestPoolConfig {
         };
 
         Self {
-            client: crate::config::initialize_http_client(),
             orca: TestOrcaDexConfig {
                 // Адрес пула Orca SOL/USDC
                 pool_address: Pubkey::from_str("Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE")

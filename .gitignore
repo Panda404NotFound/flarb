@@ -10,3 +10,5 @@ markets/orca_pools.json
 markets/raydium_pools.json
 markets/tokens.json
 markets/pools.json
+jupiter-swap-api/cache
+backup

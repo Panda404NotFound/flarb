@@ -1,12 +1,15 @@
 // src/jupiter/quote.rs
 
+use crate::config;
 use crate::test_param::TestPoolConfig;
 use jup_ag::{
-    quote, QuoteConfig, SwapMode, Result as JupiterResult
+    quote, QuoteConfig, route_map, price,
+    SwapMode, Result as JupiterResult
 };
-use std::env;
-use tokio::time::Instant;
 use log::{info, debug};
+use tokio::time::Instant;
+use std::time::Duration;
+use crate::config::{INITIALIZE_HTTP_CLIENT, DEFAULT_QUOTE_API_URL};
 
 pub async fn test_valid_pools() -> JupiterResult<()> {
     let start_time = Instant::now();
@@ -14,15 +17,17 @@ pub async fn test_valid_pools() -> JupiterResult<()> {
     let config = TestPoolConfig::default();
     let orca_params = config.get_orca_params();
     
-    // Устанавливаем URL для локального Jupiter API и инициализируем клиент
-    let base_url = env::var("LOCAL_API_HOST")
-        .unwrap_or_else(|_| "http://localhost:8080".to_string());
-    env::set_var("QUOTE_API_URL", &base_url);
-    
-    // Используем уже инициализированный клиент из config
-    let _client = config.client;
-    
-    debug!("Отправляем запрос к локальному Jupiter API");
+    // Получаем URL в зависимости от настроек
+    let api_url = if INITIALIZE_HTTP_CLIENT {
+        std::env::var("QUOTE_API_URL")
+            .expect("QUOTE_API_URL must be set")
+    } else {
+        DEFAULT_QUOTE_API_URL.to_string()
+    };
+    debug!("Using Jupiter API URL: {}", api_url);
+    debug!("Latency подключения и проверки: {:?}", start_time.elapsed());
+
+    let start_time_quote = Instant::now();
 
     let orca_quote = quote(
         config.sol_mint,
@@ -31,18 +36,12 @@ pub async fn test_valid_pools() -> JupiterResult<()> {
         QuoteConfig {
             slippage_bps: Some(orca_params.slippage_bps),
             swap_mode: Some(SwapMode::ExactIn),
-            dexes: None,
-            exclude_dexes: None,
             only_direct_routes: false,
-            as_legacy_transaction: None,
-            platform_fee_bps: None,
-            max_accounts: None,
+            ..Default::default()
         },
     ).await?;
 
-    info!("Получена котировка от локального Jupiter API");
-    debug!("Детали котировки: {:#?}", orca_quote);
-    println!("Time taken: {:?}", start_time.elapsed());
-
+    debug!("Получена котировка, детали: {:#?}", orca_quote);
+    debug!("Latency получения котировки: {:?}", start_time_quote.elapsed());
     Ok(())
 }

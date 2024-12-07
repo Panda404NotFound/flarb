@@ -4,3 +4,10 @@
 Stack backtrace:
    0: <unknown>
    1: <unknown>
+
+2024-12-07T09:09:30.007643Z  INFO jupiter_core::router: Fetching 25515 mints...
+thread 'main' panicked at jupiter-swap-api/src/main.rs:869:70:
+called `Result::unwrap()` on an `Err` value: HTTP status client error (429 Too Many Requests) for url (https://mainnet.helius-rpc.com/?api-key=7e92d5de-6cb0-4b4d-99cc-9174162e1d5f)
+
+Caused by:
+    HTTP status client error (429 Too Many Requests) for url (https://mainnet.helius-rpc.com/?api-key=7e92d5de-6cb0-4b4d-99cc-9174162e1d5f)
