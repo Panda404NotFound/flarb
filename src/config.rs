@@ -3,16 +3,33 @@
 use dotenv::dotenv;
 use std::env;
 use lazy_static::lazy_static;
-use reqwest::{Client, header};
-use std::sync::OnceLock;
-use std::time::Duration;
 
-// Статический HTTP клиент
-static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
-
-// Глобальные константы для клиента jup-ag
+// Константы для HTTP клиента
+#[allow(dead_code)]
 pub const INITIALIZE_HTTP_CLIENT: bool = false;
+#[allow(dead_code)]
 pub const DEFAULT_QUOTE_API_URL: &str = "https://quote-api.jup.ag/v6";
+#[allow(dead_code)]
+pub const H2_INITIAL_WINDOW_SIZE: u32 = 1024 * 1024 * 2; // 2MB для локального соединения
+
+// Константы для батчинга и rate limiting
+#[allow(dead_code)]
+pub const BATCH_SIZE: usize = 125;           // Размер батча для RPC запросов
+#[allow(dead_code)]
+pub const RATE_LIMIT: u32 = 450;             // Максимальное количество запросов
+#[allow(dead_code)]
+pub const RATE_LIMIT_REFRESH: u64 = 1;       // Время обновления rate limit в секундах
+
+// Константы для параллельной обработки
+#[allow(dead_code)]
+pub const WORKER_THREADS: usize = 4;         // Количество воркеров
+#[allow(dead_code)]
+pub const CPU_CORES: usize = 4;              // Количество ядер системы
+
+// Функции для доступа к конфигурации
+pub fn get_config() -> &'static Config {
+    &CONFIG
+}
 
 // Структура конфигурации
 #[allow(dead_code)]
@@ -58,51 +75,4 @@ lazy_static! {
                 .expect("HELIUS_YELLOWSTONE_AUTH_TOKEN must be set"),
         }
     };
-}
-
-pub fn initialize_http_client() -> &'static Client {
-    HTTP_CLIENT.get_or_init(|| {
-        let mut headers = header::HeaderMap::new();
-        headers.insert(
-            header::CONTENT_TYPE,
-            header::HeaderValue::from_static("application/json"),
-        );
-        
-        // HTTP/2 specific headers
-        headers.insert(
-            header::CONNECTION,
-            header::HeaderValue::from_static("keep-alive"),
-        );
-        
-        Client::builder()
-            .default_headers(headers)
-            // Отключаем таймаут простоя - соединение будет поддерживаться постоянно
-            .pool_idle_timeout(None)
-            // Держим только одно соединение на хост для эффективного переиспользования
-            .pool_max_idle_per_host(1)
-            // Принудительно используем HTTP/2
-            .http2_prior_knowledge()
-            // Настройки TCP для стабильного соединения
-            .tcp_keepalive(Some(Duration::from_secs(300)))
-            .tcp_nodelay(true)
-            // Увеличиваем таймаут запроса до разумного значения
-            .timeout(Duration::from_secs(30))
-            // Настройки HTTP/2
-            .http2_keep_alive_interval(Duration::from_secs(30))
-            .http2_keep_alive_timeout(Duration::from_secs(10))
-            .http2_adaptive_window(true)
-            .build()
-            .expect("Failed to create HTTP client")
-    })
-}
-
-// Функции для доступа к конфигурации
-#[allow(dead_code)]
-pub fn get_config() -> &'static Config {
-    &CONFIG
-}
-
-#[allow(dead_code)]
-pub fn get_http_client() -> &'static Client {
-    initialize_http_client()
 }
