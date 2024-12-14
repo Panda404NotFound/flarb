@@ -1,4 +1,4 @@
-// src/test_param.rs
+// src/params.rs
 
 use solana_program::pubkey::Pubkey;
 use std::str::FromStr;

@@ -22,7 +22,7 @@ docker run -d \
   # -e MARKET_MODE=file \
   # -e MARKET_CACHE=/app/cache/markets-v4.json \
   -e RPC_URL="https://mainnet.helius-rpc.com/" \
-  -e SECONDARY_RPC_URLS="https://quote-api.jup.ag/" \
+  -e SECONDARY_RPC_URLS="https://quote-api.jup.ag/v6" \
   -e HOST=0.0.0.0 \
   -e PORT=8080 \
   -e TOTAL_THREAD_COUNT=4 \
