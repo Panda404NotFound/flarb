@@ -3,6 +3,7 @@
 use tokio_tungstenite::connect_async;
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
+use serde_json::Value;
 use tracing::{info, error, warn, debug};
 use tokio_tungstenite::tungstenite::http::Uri;
 use crate::config::ORCA_PROGRAM_ID;
@@ -10,45 +11,100 @@ use crate::ws_parser;
 use crate::data::GLOBAL_DATA;
 use crate::config::CONFIG;
 use serde::Deserialize;
+use std::time::Instant;
+use crate::ws_parser::{WebSocketChannels, ProcessedWebSocketChannels};
+use flume::Receiver;
+use crate::ws_parser::PoolCommitment;
+use crate::ws_parser::process_orca_account_data;
 
-#[derive(Debug, Deserialize)]
-pub struct WebSocketResponse {
+#[derive(Debug, Deserialize, Clone)]
+pub struct WebSocketResponseFinalized {
     pub method: Option<String>,
-    pub params: Option<NotificationParams>,
+    pub params: Option<NotificationParamsFinalized>,
+    pub result: Option<u64>,
+    pub id: Option<u64>,
+    pub slot: Option<SlotInfo>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct WebSocketResponseProcessed {
+    pub method: Option<String>,
+    pub params: Option<NotificationParamsProcessed>,
     pub result: Option<u64>,
     pub id: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct NotificationParams {
-    pub result: NotificationResult,
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone)]
+pub struct NotificationParamsFinalized {
+    pub result: NotificationResultFinalized,
+    pub subscription: u64,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct NotificationResult {
-    pub context: Context,
-    pub value: AccountInfo,
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone)]
+pub struct NotificationParamsProcessed {
+    pub result: NotificationResultProcessed,
+    pub subscription: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum NotificationResultFinalized {
+    Program {
+        context: Context,
+        value: Value,
+    },
+    Slot {
+        slot: u64,
+        parent: u64,
+        root: u64,
+    },
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum NotificationResultProcessed {
+    Program {
+        context: Context,
+        value: Value,
+    },
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct Context {
     pub slot: u64,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct AccountInfo {
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone)]
+pub struct DataNotification {
+    pub data: (String, String),
+    pub executable: bool,
+    pub lamports: u64,
+    pub owner: String,
+    #[serde(rename = "rentEpoch")]
+    pub rent_epoch: u64,
+    pub space: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ProgramNotification {
     pub pubkey: String,
-    pub account: Account,
+    pub account: DataNotification,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct Account {
-    pub data: (String, String), // (data, encoding)
+// Добавляем новые структуры для слотов
+#[derive(Debug, Deserialize, Clone)]
+pub struct SlotInfo {
+    pub slot: u64,
+    pub parent: u64,
+    pub root: u64,
 }
 
-// Основная функция подписки
-pub async fn start_orca_websocket() -> Result<(), Box<dyn std::error::Error>> {
-    info!("Starting Orca WebSocket subscriptions");
+// Переименовываем основную функцию
+pub async fn start_orca_websocket_finalized() -> Result<(), Box<dyn std::error::Error>> {
+    info!("Starting Orca WebSocket finalized subscriptions");
         
     let url = CONFIG.helius_websocket_url.parse::<Uri>()?;
     debug!("Connecting to WebSocket URL");
@@ -58,65 +114,49 @@ pub async fn start_orca_websocket() -> Result<(), Box<dyn std::error::Error>> {
     
     let (mut write, mut read) = ws_stream.split();
 
-    // Подписка на аккаунты пулов
-    let account_subscription = {
-        let mut pool_addresses = Vec::new();
-        for entry in GLOBAL_DATA.orca_pools.iter() {
-            for pool in entry.value() {
-                pool_addresses.push(pool.pool_address.to_string());
-                debug!("Adding pool address to subscription: {}", pool.pool_address);
-            }
-        }
-        
-        // Изменяем формат - передаем каждый адрес отдельной подпиской
-        pool_addresses.iter().enumerate().map(|(index, address)| {
-            json!({
-                "jsonrpc": "2.0",
-                "id": index + 1, // Уникальный id для каждой подписки
-                "method": "accountSubscribe",
-                "params": [
-                    address,  // Передаем один адрес вместо массива
-                    {
-                        "encoding": "base64+zstd",
-                        "commitment": "confirmed"
-                    }
-                ]
-            })
-        }).collect::<Vec<_>>()
-    };
-
-    // Подписка на программу
+    // Удаляем подписки на аккаунты, оставляем только program и slot
     let program_subscription = json!({
         "jsonrpc": "2.0",
-        "id": 2,
+        "id": 1,
         "method": "programSubscribe",
         "params": [
             ORCA_PROGRAM_ID,
             {
                 "encoding": "base64+zstd",
-                "commitment": "confirmed"
+                "commitment": "finalized"
             }
         ]
     });
 
-    // Отправляем подписки на аккаунты
-    for subscription in account_subscription {
-        debug!("Sending account subscription request for address");
-        write.send(tokio_tungstenite::tungstenite::Message::Text(subscription.to_string())).await?;
-    }
+    let slot_subscription = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "slotSubscribe",
+        "params": []
+    });
 
-    // Отправляем подписку на программу
+    // Отправляем подписки
     debug!("Sending program subscription request");
     write.send(tokio_tungstenite::tungstenite::Message::Text(program_subscription.to_string())).await?;
 
+    debug!("Sending slot subscription request");
+    write.send(tokio_tungstenite::tungstenite::Message::Text(slot_subscription.to_string())).await?;
+
     info!("Successfully sent all subscription requests");
+
+    let (channels, receivers) = WebSocketChannels::new();
+    
+    // Запускаем обработчики (удаляем account handler)
+    tokio::spawn(handle_program_notifications(receivers.program_rx));
+    tokio::spawn(handle_slot_notifications(receivers.slot_rx));
 
     // Обработка сообщений
     while let Some(msg) = read.next().await {
         match msg {
             Ok(msg) => {
                 if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
-                    debug!("Received WebSocket message");
+                    // debug!("Received WebSocket message");
+                    // let message_receive_time = Instant::now();
                     
                     match serde_json::from_str(&text) {
                         Ok(json) => {
@@ -127,14 +167,27 @@ pub async fn start_orca_websocket() -> Result<(), Box<dyn std::error::Error>> {
                                         continue;
                                     }
                                     
+                                    // let parse_duration = message_receive_time.elapsed();
+                                    // debug!("Initial message parsing took: {:?}", parse_duration);
+                                    
                                     match response.method.as_deref() {
-                                        Some("accountNotification") => {
-                                            debug!("Processing account notification");
-                                            ws_parser::handle_orca_account_update(response).await;
-                                        },
                                         Some("programNotification") => {
-                                            debug!("Processing program notification");
-                                            ws_parser::handle_orca_account_update(response).await;
+                                            ws_parser::handle_orca_program_update(response, &channels).await;
+                                        },
+                                        Some("slotNotification") => {
+                                            if let Some(params) = response.params {
+                                                if let NotificationResultFinalized::Slot { slot, parent, root } = params.result {
+                                                    let slot_info = SlotInfo {
+                                                        slot,
+                                                        parent,
+                                                        root,
+                                                    };
+                                                    // Обновляем состояние сети
+                                                    GLOBAL_DATA.update_network_state(slot_info.clone());
+                                                    // Отправляем в канал для асинхронной обработки
+                                                    let _ = channels.slot_tx.send_async(slot_info).await;
+                                                }
+                                            }
                                         },
                                         Some(method) => {
                                             warn!("Received unknown notification method: {}", method);
@@ -159,10 +212,160 @@ pub async fn start_orca_websocket() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+// Обработчик для программы с использованием process_orca_account_data finalized
+async fn handle_program_notifications(rx: Receiver<WebSocketResponseFinalized>) {
+    while let Ok(response) = rx.recv_async().await {
+        if let Some(params) = response.params {
+            match params.result {
+                NotificationResultFinalized::Program { context, value } => {
+                    if let Ok(program_notification) = serde_json::from_value::<ProgramNotification>(value) {
+                        let pubkey = program_notification.pubkey.parse().unwrap_or_default();
+                        let receive_time = Instant::now();
+                        process_orca_account_data(
+                            context.slot,
+                            pubkey,
+                            &program_notification.account,
+                            receive_time,
+                            PoolCommitment::Finalized
+                        ).await;
+                    }
+                },
+                NotificationResultFinalized::Slot { .. } => {
+                    // Игнорируем уведомления о слотах в этом обработчике
+                    debug!("Received slot notification in program handler");
+                }
+            }
+        }
+    }
+}
+
+// Добавляем обработчик слотов
+async fn handle_slot_notifications(rx: Receiver<SlotInfo>) {
+    while let Ok(slot_info) = rx.recv_async().await {
+        // Валидация и логирование
+        if slot_info.slot < slot_info.parent {
+            warn!("Invalid slot sequence detected: slot {} is less than parent {}", 
+                  slot_info.slot, slot_info.parent);
+        }
+
+        if slot_info.parent - slot_info.root > 150 {
+            warn!("Large gap between parent and root slots: parent={}, root={}", 
+                  slot_info.parent, slot_info.root);
+        }
+
+        GLOBAL_DATA.update_network_state(slot_info);
+    }
+}
+
+// Обработка пулов Processed
+pub async fn start_orca_websocket_processed() -> Result<(), Box<dyn std::error::Error>> {
+    info!("Starting Orca WebSocket finalized subscriptions");
+        
+    let url = CONFIG.helius_websocket_url.parse::<Uri>()?;
+    debug!("Connecting to WebSocket URL");
+    
+    let (ws_stream, _) = connect_async(url).await?;
+    info!("Successfully connected to WebSocket server");
+    
+    let (mut write, mut read) = ws_stream.split();
+
+    // Удаляем подписки на аккаунты, оставляем только program и slot
+    let program_subscription = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "programSubscribe",
+        "params": [
+            ORCA_PROGRAM_ID,
+            {
+                "encoding": "base64+zstd",
+                "commitment": "processed"
+            }
+        ]
+    });
+
+    // Отправляем подписки
+    debug!("Sending program subscription request");
+    write.send(tokio_tungstenite::tungstenite::Message::Text(program_subscription.to_string())).await?;
+    info!("Successfully sent all subscription requests");
+
+    let (channels, receivers) = ProcessedWebSocketChannels::new();
+    
+    // Запускаем обработчики (удаляем account handler)
+    tokio::spawn(handle_program_notifications_processed(receivers.program_rx));
+
+    // Обработка сообщений
+    while let Some(msg) = read.next().await {
+        match msg {
+            Ok(msg) => {
+                if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
+                    // debug!("Received WebSocket message");
+                    // let message_receive_time = Instant::now();
+                    
+                    match serde_json::from_str(&text) {
+                        Ok(json) => {
+                            match ws_parser::parse_ws_message_processed(json).await {
+                                Ok(response) => {
+                                    if ws_parser::is_subscription_success_processed(&response) {
+                                        info!("Successfully subscribed with id: {:?}", response.result);
+                                        continue;
+                                    }
+                                    
+                                    // let parse_duration = message_receive_time.elapsed();
+                                    // debug!("Initial message parsing took: {:?}", parse_duration);
+                                    
+                                    match response.method.as_deref() {
+                                        Some("programNotification") => {
+                                            ws_parser::handle_orca_program_update_processed(response, &channels).await;
+                                        },
+                                        Some(method) => {
+                                            warn!("Received unknown notification method: {}", method);
+                                        },
+                                        None => {
+                                            debug!("Received message without method");
+                                        }
+                                    }
+                                },
+                                Err(e) => error!("Failed to parse WebSocket message: {}", e),
+                            }
+                        },
+                        Err(e) => error!("Failed to parse JSON: {}", e),
+                    }
+                }
+            },
+            Err(e) => error!("Error receiving message: {}", e),
+        }
+    }
+
+    warn!("WebSocket connection closed");
+    Ok(())
+}
+
+// Обработчик для программы с использованием process_orca_account_data processed
+async fn handle_program_notifications_processed(rx: Receiver<WebSocketResponseProcessed>) {
+    while let Ok(response) = rx.recv_async().await {
+        if let Some(params) = response.params {
+            match params.result {
+                NotificationResultProcessed::Program { context, value } => {
+                    if let Ok(program_notification) = serde_json::from_value::<ProgramNotification>(value) {
+                        let pubkey = program_notification.pubkey.parse().unwrap_or_default();
+                        let receive_time = Instant::now();
+                        process_orca_account_data(
+                            context.slot,
+                            pubkey,
+                            &program_notification.account,
+                            receive_time,
+                            PoolCommitment::Processed
+                        ).await;
+                    }
+                },
+            }
+        }
+    }
+}
 
 // TODO: Форматы подтверждения подписки:
 
-/* 
+/*
 
 ### 1. `"commitment": "finalized"`
 - Самый высокий уровень подтверждения
