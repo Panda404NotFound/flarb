@@ -8,9 +8,18 @@ mod ws_parser;
 mod data;
 mod fetch_address;
 mod decoder;
+mod ws_data;
+mod ws_raydium;
+mod ws_meteora;
 
 use log::info;
+use crate::data::GLOBAL_DATA;
+use crate::ws_data::DexType;
+
 use crate::ws_orca::{start_orca_websocket_finalized, start_orca_websocket_processed};
+use crate::ws_raydium::{start_raydium_websocket_finalized, start_raydium_websocket_processed};
+use crate::ws_meteora::{start_meteora_websocket_finalized, start_meteora_websocket_processed};
+
 use crate::config::{INITIALIZE_HTTP_CLIENT, get_config, DEFAULT_QUOTE_API_URL};
 use crate::fetch_address::start_fetching;
 
@@ -48,6 +57,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     start_fetching().await?;
     info!("Парсинг адресов DEX завершен");
 
+    // Инициализация структуры DEX для пулов
+    GLOBAL_DATA.initialize_pool_states(DexType::Orca);
+    GLOBAL_DATA.initialize_pool_states(DexType::Raydium);
+    GLOBAL_DATA.initialize_pool_states(DexType::Meteora);
+
+
     // TODO: Запуск RPC вызова для получения актуальных данных
 
     // TODO: Запуск построения графов 
@@ -60,6 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // info!("Запуск тестирования Orca Whirlpool...");
     // quote::test_valid_pools().await?;
 
+
     // Запуск подписки на пулах Finalized в отдельной задаче
     tokio::spawn(async {
         let _ = start_orca_websocket_finalized().await;
@@ -68,6 +84,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Запуск подписки на пулах Processed в отдельной задаче
     tokio::spawn(async {
         let _ = start_orca_websocket_processed().await;
+    });
+
+    // Запуск подписки на пулах Raydium CLMM и Raydium V4 finalized
+    tokio::spawn(async {
+        let _ = start_raydium_websocket_finalized().await;
+    });
+    
+    // Запуск подписки на пулах Raydium CLMM и Raydium V4 Processed
+    tokio::spawn(async {
+        let _ = start_raydium_websocket_processed().await;
+    });
+
+    // Запуск подписки на пулах Meteora finalized
+    tokio::spawn(async {
+        let _ = start_meteora_websocket_finalized().await;
+    });
+        
+    // Запуск подписки на пулах Meteora Processed
+    tokio::spawn(async {
+        let _ = start_meteora_websocket_processed().await;
     });
     
     // Держим главный поток активным

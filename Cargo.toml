@@ -31,6 +31,7 @@ serde = { version = "1.0.192", features = ["derive"] }
 serde_json = "1.0.133"
 anyhow = "1.0.76"
 url = "2.5.4"
+async-trait = "0.1.83"
 
 base64 = "0.22.0"
 zstd = "0.13.2"
@@ -61,3 +62,24 @@ bytes = "1.5.0"
 flume = "0.11.0"
 # Для параллельных вычислений
 rayon = "1.7.0"
+# Для эффективной работы с битовыми массивами
+bitvec = "1.0.1"
+# Для эффективной работы с хеш-таблицами
+hashbrown = { version = "0.14", features = ["raw"] }
+
+
+[profile.dev]
+debug = true
+opt-level = 0
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
+debug-assertions = false
+
+[profile.release.package."*"]
+opt-level = 3

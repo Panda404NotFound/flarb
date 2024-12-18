@@ -40,6 +40,98 @@ pub struct WhirlpoolData {
     pub protocol_fee_owed_b: u64,   // 8 bytes
 }
 
+#[derive(Debug, Copy, Clone, Pod, Zeroable)]
+#[repr(C, packed)]
+pub struct RaydiumData {
+    // Базовые параметры пула
+    pub status: u64,                   // 8 bytes
+    pub pool_state: u64,               // 8 bytes
+    pub amm_id: Pubkey,               // 32 bytes
+    pub market_id: Pubkey,            // 32 bytes
+    
+    // Токены и ликвидность
+    pub token_a: Pubkey,              // 32 bytes 
+    pub token_b: Pubkey,              // 32 bytes
+    pub lp_mint: Pubkey,              // 32 bytes
+    pub open_orders: Pubkey,          // 32 bytes
+    
+    // Параметры пула
+    pub needs_withdraw: u64,          // 8 bytes
+    pub recent_slot: u64,             // 8 bytes
+    pub last_order_slot: u64,         // 8 bytes
+    pub total_lp: u64,                // 8 bytes
+    pub base_need_take: u64,          // 8 bytes
+    pub quote_need_take: u64,         // 8 bytes
+    
+    // Ценовые параметры  
+    pub base_decimal: u64,            // 8 bytes
+    pub quote_decimal: u64,           // 8 bytes
+    pub min_price: u64,               // 8 bytes
+    pub max_price: u64,               // 8 bytes
+    pub vol_max_cut_ratio: u64,       // 8 bytes
+    
+    // Параметры комиссий
+    pub fee_numerator: u64,           // 8 bytes 
+    pub fee_denominator: u64,         // 8 bytes
+    pub ret_fee_numerator: u64,       // 8 bytes
+    pub ret_fee_denominator: u64,     // 8 bytes
+    
+    // Дополнительные параметры
+    pub punish_pc_amount: u64,        // 8 bytes
+    pub punish_coin_amount: u64,      // 8 bytes
+    pub orders_num: u64,              // 8 bytes
+    pub depth: u64,                   // 8 bytes
+    pub open_time: u64,               // 8 bytes
+    pub switch_time: u64,             // 8 bytes
+}
+
+#[derive(Debug, Copy, Clone, Pod, Zeroable)]
+#[repr(C, packed)]
+pub struct MeteoraData {
+    // Основные параметры пула
+    pub pool_id: Pubkey,               // 32 bytes
+    pub authority: Pubkey,             // 32 bytes
+    pub token_mint_a: Pubkey,          // 32 bytes
+    pub token_mint_b: Pubkey,          // 32 bytes
+    pub token_vault_a: Pubkey,         // 32 bytes
+    pub token_vault_b: Pubkey,         // 32 bytes
+    pub lp_mint: Pubkey,               // 32 bytes
+    
+    // Параметры ликвидности
+    pub total_lp: u64,                 // 8 bytes
+    pub liquidity: u128,               // 16 bytes
+    pub sqrt_price: u128,              // 16 bytes
+    pub current_tick_index: i32,       // 4 bytes
+    pub tick_spacing: u16,             // 2 bytes
+    pub fee_rate: u16,                 // 2 bytes
+    
+    // Параметры DLMM
+    pub protocol_fee_rate: u16,        // 2 bytes
+    
+    // Накопленные комиссии и метрики
+    pub fee_growth_global_a: u128,     // 16 bytes
+    pub fee_growth_global_b: u128,     // 16 bytes
+    pub fee_protocol_token_a: u64,     // 8 bytes 
+    pub fee_protocol_token_b: u64,     // 8 bytes
+    
+    // Диапазоны цен и тиков
+    pub max_price_sqrt: u128,          // 16 bytes
+    pub min_price_sqrt: u128,          // 16 bytes
+    pub max_tick_index: i32,           // 4 bytes 
+    pub min_tick_index: i32,           // 4 bytes
+    
+    // Параметры динамической ликвидности
+    pub dynamic_liquidity_mode: u8,    // 1 byte
+    pub liquidity_cap: u128,           // 16 bytes
+    pub liquidity_multiplier: u64,     // 8 bytes
+    
+    // Метаданные и статистика
+    pub last_update_timestamp: i64,    // 8 bytes
+    pub last_update_slot: u64,         // 8 bytes
+    pub volume_24h: u64,               // 8 bytes
+    pub fees_24h: u64,                 // 8 bytes
+}
+
 // Оптимизированный пул буферов
 thread_local! {
     static DECODE_BUFFER: std::cell::RefCell<BytesMut> = std::cell::RefCell::new(BytesMut::with_capacity(1024 * 32));
@@ -191,6 +283,44 @@ pub fn parse_whirlpool_data(data: &[u8]) -> Result<WhirlpoolData, Box<dyn Error 
     }
     */
     // ДАННЫЕ ЛОГИРОВАНИЯ МОЖНО БЕЗОПАСНО УДАЛИТЬ
+
+    Ok(*pool_data)
+}
+
+// Парсинг данных пула для Raydium
+pub fn parse_raydium_data(data: &[u8]) -> Result<RaydiumData, Box<dyn Error + Send + Sync>> {
+    // let parsing_time = Instant::now();
+    if data.len() < std::mem::size_of::<RaydiumData>() {
+        error!("Data too small for RaydiumData: got {} bytes, need {}", 
+               data.len(), std::mem::size_of::<RaydiumData>());
+        return Err("Insufficient data length".into());
+    }
+
+    let pool_data = bytemuck::try_from_bytes::<RaydiumData>(
+        &data[..std::mem::size_of::<RaydiumData>()]
+    ).map_err(|e| {
+        error!("Failed to parse RaydiumPoolState: {}", e);
+        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())) as Box<dyn Error + Send + Sync>
+    })?;
+
+    Ok(*pool_data)
+}
+
+// Парсинг данных пула для Meteora
+pub fn parse_meteora_data(data: &[u8]) -> Result<MeteoraData, Box<dyn Error + Send + Sync>> {
+    // let parsing_time = Instant::now();
+    if data.len() < std::mem::size_of::<MeteoraData>() {
+        error!("Data too small for MeteoraData: got {} bytes, need {}", 
+               data.len(), std::mem::size_of::<MeteoraData>());
+        return Err("Insufficient data length".into());
+    }
+
+    let pool_data = bytemuck::try_from_bytes::<MeteoraData>(
+        &data[..std::mem::size_of::<MeteoraData>()]
+    ).map_err(|e| {
+        error!("Failed to parse MeteoraData: {}", e);
+        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())) as Box<dyn Error + Send + Sync>
+    })?;
 
     Ok(*pool_data)
 }

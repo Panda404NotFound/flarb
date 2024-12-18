@@ -6,6 +6,7 @@ use std::io::BufReader;
 use serde_json::Value;
 use solana_program::pubkey::Pubkey;
 use crate::data::GLOBAL_DATA;
+use crate::ws_data::DexType;
 use crate::config::{INITIAL_TOKENS, MIN_TVL};
 use anyhow::Result;
 use log::{info, debug, warn};
@@ -44,6 +45,16 @@ pub async fn start_fetching() -> Result<()> {
     debug!("Пулы Orca успешно загружены");
     process_orca_pools(&orca_pools)?;
 
+    // Загружаем и обрабатываем пулы Raydium
+    let raydium_pools = load_raydium_pools()?;
+    debug!("Пулы Raydium успешно загружены");
+    process_raydium_pools(&raydium_pools)?;
+
+    // Загружаем и обрабатываем пулы Meteora
+    let meteora_pools = load_meteora_pools()?;
+    debug!("Пулы Meteora успешно загружены");
+    process_meteora_pools(&meteora_pools)?;
+
     info!("Инициализация логики успешно завершена");
     Ok(())
 }
@@ -81,13 +92,14 @@ fn process_orca_pools(pools: &Value) -> Result<()> {
                     pool["tokenB"]["mint"].as_str().unwrap_or_default()
                 )?;
                 
-                if GLOBAL_DATA.add_orca_pool(
+                if GLOBAL_DATA.add_pools(
                     token_a_symbol.to_string(),
                     token_b_symbol.to_string(),
                     pool_address,
                     token_a_address,
                     token_b_address,
-                    tvl
+                    tvl, 
+                    DexType::Orca
                 ) {
                     processed += 1;
                 } else {
@@ -98,6 +110,129 @@ fn process_orca_pools(pools: &Value) -> Result<()> {
     }
 
     info!("Обработка пулов Orca завершена. Обработано: {}, Пропущено по TVL: {}, Пропущено существующих: {}", 
+        processed, skipped_low_tvl, skipped_existing);
+    Ok(())
+}
+
+fn process_raydium_pools(pools: &Value) -> Result<()> {
+    info!("Начало обработки пулов Raydium");
+    let mut processed = 0;
+    let mut skipped_low_tvl = 0;
+    let mut skipped_existing = 0;
+
+    if let Some(pools_array) = pools["data"].as_array() {
+        for pool in pools_array {
+            let token_a_address = Pubkey::from_str(
+                pool["mintA"].as_str().unwrap_or_default()
+            )?;
+            let token_b_address = Pubkey::from_str(
+                pool["mintB"].as_str().unwrap_or_default()
+            )?;
+
+            // Проверяем, что оба токена входят в наш список интересующих токенов
+            if let (Some(token_a), Some(token_b)) = (
+                GLOBAL_DATA.token_addresses.get(&token_a_address),
+                GLOBAL_DATA.token_addresses.get(&token_b_address)
+            ) {
+                if GLOBAL_DATA.tokens.contains_key(&token_a.symbol) && 
+                   GLOBAL_DATA.tokens.contains_key(&token_b.symbol) {
+                    
+                    let tvl = pool["tvl"].as_f64().unwrap_or_default();
+                    if tvl < MIN_TVL {
+                        skipped_low_tvl += 1;
+                        continue;
+                    }
+
+                    let pool_address = Pubkey::from_str(
+                        pool["id"].as_str().unwrap_or_default()
+                    )?;
+                    
+                    if GLOBAL_DATA.add_pools(
+                        token_a.symbol.clone(),
+                        token_b.symbol.clone(),
+                        pool_address,
+                        token_a_address,
+                        token_b_address,
+                        tvl,
+                        DexType::Raydium
+                    ) {
+                        processed += 1;
+                    } else {
+                        skipped_existing += 1;
+                    }
+                } else {
+                    skipped_existing += 1;
+                }
+            } else {
+                skipped_existing += 1;
+            }
+        }
+    }
+
+    info!("Обработка пулов Raydium завершена. Обработано: {}, Пропущено по TVL: {}, Пропущено существующих: {}", 
+        processed, skipped_low_tvl, skipped_existing);
+    Ok(())
+}
+
+fn process_meteora_pools(pools: &Value) -> Result<()> {
+    info!("Начало обработки пулов Meteora");
+    let mut processed = 0;
+    let mut skipped_low_tvl = 0;
+    let mut skipped_existing = 0;
+
+    if let Some(pools_array) = pools.as_array() {
+        for pool in pools_array {
+            let token_a_address = Pubkey::from_str(
+                pool["mint_x"].as_str().unwrap_or_default()
+            )?;
+            let token_b_address = Pubkey::from_str(
+                pool["mint_y"].as_str().unwrap_or_default()
+            )?;
+
+            // Проверяем, что оба токена входят в наш список интересующих токенов
+            if let (Some(token_a), Some(token_b)) = (
+                GLOBAL_DATA.token_addresses.get(&token_a_address),
+                GLOBAL_DATA.token_addresses.get(&token_b_address)
+            ) {
+                if GLOBAL_DATA.tokens.contains_key(&token_a.symbol) && 
+                   GLOBAL_DATA.tokens.contains_key(&token_b.symbol) {
+                    
+                    let tvl = pool["liquidity"].as_str()
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or_default();
+                        
+                    if tvl < MIN_TVL {
+                        skipped_low_tvl += 1;
+                        continue;
+                    }
+
+                    let pool_address = Pubkey::from_str(
+                        pool["address"].as_str().unwrap_or_default()
+                    )?;
+                    
+                    if GLOBAL_DATA.add_pools(
+                        token_a.symbol.clone(),
+                        token_b.symbol.clone(),
+                        pool_address,
+                        token_a_address,
+                        token_b_address,
+                        tvl,
+                        DexType::Meteora
+                    ) {
+                        processed += 1;
+                    } else {
+                        skipped_existing += 1;
+                    }
+                } else {
+                    skipped_existing += 1;
+                }
+            } else {
+                skipped_existing += 1;
+            }
+        }
+    }
+
+    info!("Обработка пулов Meteora завершена. Обработано: {}, Пропущено по TVL: {}, Пропущено существующих: {}", 
         processed, skipped_low_tvl, skipped_existing);
     Ok(())
 }
@@ -117,6 +252,24 @@ fn load_orca_pools() -> Result<Value> {
     let reader = BufReader::new(file);
     let pools: Value = serde_json::from_reader(reader)?;
     debug!("Файл пулов Orca успешно прочитан");
+    Ok(pools)
+}
+
+fn load_raydium_pools() -> Result<Value> {
+    info!("Загрузка пулов Raydium из файла");
+    let file = File::open("./pools/raydium_pools.json")?;
+    let reader = BufReader::new(file);
+    let pools: Value = serde_json::from_reader(reader)?;
+    debug!("Файл пулов Raydium успешно прочитан");
+    Ok(pools)
+}
+
+fn load_meteora_pools() -> Result<Value> {
+    info!("Загрузка пулов Meteora из файла");
+    let file = File::open("./pools/meteora_pools.json")?;
+    let reader = BufReader::new(file);
+    let pools: Value = serde_json::from_reader(reader)?;
+    debug!("Файл пулов Meteora успешно прочитан");
     Ok(pools)
 }
 

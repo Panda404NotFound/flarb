@@ -3,104 +3,20 @@
 use tokio_tungstenite::connect_async;
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
-use serde_json::Value;
 use tracing::{info, error, warn, debug};
 use tokio_tungstenite::tungstenite::http::Uri;
 use crate::config::ORCA_PROGRAM_ID;
 use crate::ws_parser;
 use crate::data::GLOBAL_DATA;
 use crate::config::CONFIG;
-use serde::Deserialize;
 use std::time::Instant;
-use crate::ws_parser::{WebSocketChannels, ProcessedWebSocketChannels};
 use flume::Receiver;
 use crate::ws_parser::PoolCommitment;
-use crate::ws_parser::process_orca_account_data;
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct WebSocketResponseFinalized {
-    pub method: Option<String>,
-    pub params: Option<NotificationParamsFinalized>,
-    pub result: Option<u64>,
-    pub id: Option<u64>,
-    pub slot: Option<SlotInfo>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct WebSocketResponseProcessed {
-    pub method: Option<String>,
-    pub params: Option<NotificationParamsProcessed>,
-    pub result: Option<u64>,
-    pub id: Option<u64>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Deserialize, Clone)]
-pub struct NotificationParamsFinalized {
-    pub result: NotificationResultFinalized,
-    pub subscription: u64,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Deserialize, Clone)]
-pub struct NotificationParamsProcessed {
-    pub result: NotificationResultProcessed,
-    pub subscription: u64,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-#[serde(untagged)]
-pub enum NotificationResultFinalized {
-    Program {
-        context: Context,
-        value: Value,
-    },
-    Slot {
-        slot: u64,
-        parent: u64,
-        root: u64,
-    },
-}
-
-#[derive(Debug, Deserialize, Clone)]
-#[serde(untagged)]
-pub enum NotificationResultProcessed {
-    Program {
-        context: Context,
-        value: Value,
-    },
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct Context {
-    pub slot: u64,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Deserialize, Clone)]
-pub struct DataNotification {
-    pub data: (String, String),
-    pub executable: bool,
-    pub lamports: u64,
-    pub owner: String,
-    #[serde(rename = "rentEpoch")]
-    pub rent_epoch: u64,
-    pub space: Option<u64>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct ProgramNotification {
-    pub pubkey: String,
-    pub account: DataNotification,
-}
-
-// Добавляем новые структуры для слотов
-#[derive(Debug, Deserialize, Clone)]
-pub struct SlotInfo {
-    pub slot: u64,
-    pub parent: u64,
-    pub root: u64,
-}
+use crate::ws_parser::process_account_data;
+use crate::ws_data::
+{WebSocketChannels, OrcaWebSocketChannels, DexType,
+    NotificationResultFinalized, NotificationResultProcessed, 
+    ProgramNotification, SlotInfo, OrcaFinalizedResponse, ProcessedResponse};
 
 // Переименовываем основную функцию
 pub async fn start_orca_websocket_finalized() -> Result<(), Box<dyn std::error::Error>> {
@@ -144,7 +60,7 @@ pub async fn start_orca_websocket_finalized() -> Result<(), Box<dyn std::error::
 
     info!("Successfully sent all subscription requests");
 
-    let (channels, receivers) = WebSocketChannels::new();
+    let (channels, receivers) = OrcaWebSocketChannels::new();
     
     // Запускаем обработчики (удаляем account handler)
     tokio::spawn(handle_program_notifications(receivers.program_rx));
@@ -160,22 +76,26 @@ pub async fn start_orca_websocket_finalized() -> Result<(), Box<dyn std::error::
                     
                     match serde_json::from_str(&text) {
                         Ok(json) => {
-                            match ws_parser::parse_ws_message(json).await {
+                            match ws_parser::parse_ws_message::<OrcaFinalizedResponse>(json).await {
                                 Ok(response) => {
                                     if ws_parser::is_subscription_success(&response) {
-                                        info!("Successfully subscribed with id: {:?}", response.result);
+                                        info!("Successfully subscribed with id: {:?}", response.base.result);
                                         continue;
                                     }
                                     
                                     // let parse_duration = message_receive_time.elapsed();
                                     // debug!("Initial message parsing took: {:?}", parse_duration);
                                     
-                                    match response.method.as_deref() {
+                                    match response.base.method.as_deref() {
                                         Some("programNotification") => {
-                                            ws_parser::handle_orca_program_update(response, &channels).await;
+                                            ws_parser::handle_program_update(
+                                                response,
+                                                &channels,
+                                                DexType::Orca
+                                            ).await;
                                         },
                                         Some("slotNotification") => {
-                                            if let Some(params) = response.params {
+                                            if let Some(params) = response.base.params {
                                                 if let NotificationResultFinalized::Slot { slot, parent, root } = params.result {
                                                     let slot_info = SlotInfo {
                                                         slot,
@@ -212,51 +132,6 @@ pub async fn start_orca_websocket_finalized() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-// Обработчик для программы с использованием process_orca_account_data finalized
-async fn handle_program_notifications(rx: Receiver<WebSocketResponseFinalized>) {
-    while let Ok(response) = rx.recv_async().await {
-        if let Some(params) = response.params {
-            match params.result {
-                NotificationResultFinalized::Program { context, value } => {
-                    if let Ok(program_notification) = serde_json::from_value::<ProgramNotification>(value) {
-                        let pubkey = program_notification.pubkey.parse().unwrap_or_default();
-                        let receive_time = Instant::now();
-                        process_orca_account_data(
-                            context.slot,
-                            pubkey,
-                            &program_notification.account,
-                            receive_time,
-                            PoolCommitment::Finalized
-                        ).await;
-                    }
-                },
-                NotificationResultFinalized::Slot { .. } => {
-                    // Игнорируем уведомления о слотах в этом обработчике
-                    debug!("Received slot notification in program handler");
-                }
-            }
-        }
-    }
-}
-
-// Добавляем обработчик слотов
-async fn handle_slot_notifications(rx: Receiver<SlotInfo>) {
-    while let Ok(slot_info) = rx.recv_async().await {
-        // Валидация и логирование
-        if slot_info.slot < slot_info.parent {
-            warn!("Invalid slot sequence detected: slot {} is less than parent {}", 
-                  slot_info.slot, slot_info.parent);
-        }
-
-        if slot_info.parent - slot_info.root > 150 {
-            warn!("Large gap between parent and root slots: parent={}, root={}", 
-                  slot_info.parent, slot_info.root);
-        }
-
-        GLOBAL_DATA.update_network_state(slot_info);
-    }
-}
-
 // Обработка пулов Processed
 pub async fn start_orca_websocket_processed() -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting Orca WebSocket finalized subscriptions");
@@ -288,7 +163,7 @@ pub async fn start_orca_websocket_processed() -> Result<(), Box<dyn std::error::
     write.send(tokio_tungstenite::tungstenite::Message::Text(program_subscription.to_string())).await?;
     info!("Successfully sent all subscription requests");
 
-    let (channels, receivers) = ProcessedWebSocketChannels::new();
+    let (channels, receivers) = WebSocketChannels::new();
     
     // Запускаем обработчики (удаляем account handler)
     tokio::spawn(handle_program_notifications_processed(receivers.program_rx));
@@ -303,9 +178,9 @@ pub async fn start_orca_websocket_processed() -> Result<(), Box<dyn std::error::
                     
                     match serde_json::from_str(&text) {
                         Ok(json) => {
-                            match ws_parser::parse_ws_message_processed(json).await {
+                            match ws_parser::parse_ws_message::<ProcessedResponse>(json).await {
                                 Ok(response) => {
-                                    if ws_parser::is_subscription_success_processed(&response) {
+                                    if ws_parser::is_subscription_success(&response) {
                                         info!("Successfully subscribed with id: {:?}", response.result);
                                         continue;
                                     }
@@ -315,7 +190,11 @@ pub async fn start_orca_websocket_processed() -> Result<(), Box<dyn std::error::
                                     
                                     match response.method.as_deref() {
                                         Some("programNotification") => {
-                                            ws_parser::handle_orca_program_update_processed(response, &channels).await;
+                                            ws_parser::handle_program_update(
+                                                response,
+                                                &channels,
+                                                DexType::Orca
+                                            ).await;
                                         },
                                         Some(method) => {
                                             warn!("Received unknown notification method: {}", method);
@@ -340,8 +219,39 @@ pub async fn start_orca_websocket_processed() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-// Обработчик для программы с использованием process_orca_account_data processed
-async fn handle_program_notifications_processed(rx: Receiver<WebSocketResponseProcessed>) {
+// Обработчик для программы с использованием process_account_data finalized
+async fn handle_program_notifications(rx: Receiver<OrcaFinalizedResponse>) {
+    // info!("Starting program notifications handler");
+    while let Ok(response) = rx.recv_async().await {
+        if let Some(params) = response.base.params {
+            match params.result {
+                NotificationResultFinalized::Program { context, value } => {
+                    if let Ok(program_notification) = serde_json::from_value::<ProgramNotification>(value) {
+                        let pubkey = program_notification.pubkey.parse().unwrap_or_default();
+                        let receive_time = Instant::now();
+                        process_account_data(
+                            context.slot,
+                            pubkey,
+                            &program_notification.account,
+                            receive_time,
+                            PoolCommitment::Finalized,
+                            DexType::Orca
+                        ).await;
+                    }
+                    // info!("Program notification processed");
+                },
+                NotificationResultFinalized::Slot { .. } => {
+                    // Игнорируем уведомления о слотах в этом обработчике
+                    debug!("Received slot notification in finalized program handler");
+                }
+            }
+        }
+    }
+}
+
+// Обработчик для программы с использованием process_account_data processed
+async fn handle_program_notifications_processed(rx: Receiver<ProcessedResponse>) {
+    // info!("Starting program notifications handler processed");
     while let Ok(response) = rx.recv_async().await {
         if let Some(params) = response.params {
             match params.result {
@@ -349,17 +259,38 @@ async fn handle_program_notifications_processed(rx: Receiver<WebSocketResponsePr
                     if let Ok(program_notification) = serde_json::from_value::<ProgramNotification>(value) {
                         let pubkey = program_notification.pubkey.parse().unwrap_or_default();
                         let receive_time = Instant::now();
-                        process_orca_account_data(
+                        process_account_data(
                             context.slot,
                             pubkey,
                             &program_notification.account,
                             receive_time,
-                            PoolCommitment::Processed
+                            PoolCommitment::Processed,
+                            DexType::Orca
                         ).await;
                     }
+                    // info!("Program notification processed processed");
                 },
             }
         }
+    }
+}
+
+// Добавляем обработчик слотов
+async fn handle_slot_notifications(rx: Receiver<SlotInfo>) {
+    // info!("Starting slot notifications handler");
+    while let Ok(slot_info) = rx.recv_async().await {
+        // Валидация и логирование
+        if slot_info.slot < slot_info.parent {
+            warn!("Invalid slot sequence detected: slot {} is less than parent {}", 
+                  slot_info.slot, slot_info.parent);
+        }
+
+        if slot_info.parent - slot_info.root > 150 {
+            warn!("Large gap between parent and root slots: parent={}, root={}", 
+                  slot_info.parent, slot_info.root);
+        }
+
+        GLOBAL_DATA.update_network_state(slot_info);
     }
 }
 
