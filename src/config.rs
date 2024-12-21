@@ -84,6 +84,8 @@ pub struct Config {
     pub helius_websocket_url: String,
     pub helius_yellowstone_endpoint: String,
     pub helius_yellowstone_auth_token: String,
+    pub dest_ip_ports: String,
+    pub jito_udp_port: String,
 }
 
 // Глобальная конфигурация
@@ -112,6 +114,10 @@ lazy_static! {
                 .expect("HELIUS_YELLOWSTONE_ENDPOINT must be set"),
             helius_yellowstone_auth_token: env::var("HELIUS_YELLOWSTONE_AUTH_TOKEN")
                 .expect("HELIUS_YELLOWSTONE_AUTH_TOKEN must be set"),
+            dest_ip_ports: env::var("DEST_IP_PORTS")
+                .expect("DEST_IP_PORTS must be set"),
+            jito_udp_port: env::var("JITO_UDP_PORT")
+                .expect("JITO_UDP_PORT must be set"),
         }
     };
 }

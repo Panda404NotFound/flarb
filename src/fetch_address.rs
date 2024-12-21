@@ -6,7 +6,7 @@ use std::io::BufReader;
 use serde_json::Value;
 use solana_program::pubkey::Pubkey;
 use crate::data::GLOBAL_DATA;
-use crate::ws_data::DexType;
+use crate::websocket::ws_data::DexType;
 use crate::config::{INITIAL_TOKENS, MIN_TVL};
 use anyhow::Result;
 use log::{info, debug, warn};

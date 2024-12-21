@@ -4,6 +4,8 @@
 target/
 .env
 help.txt
+jito.txt
+tvu_jito_help.txt
 package-lock.json
 Cargo.lock
 markets/orca_pools.json

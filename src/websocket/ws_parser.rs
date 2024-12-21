@@ -8,7 +8,7 @@ use crate::decoder::{WhirlpoolData, RaydiumData, MeteoraData};
 use crate::decoder::{decode_base64_zstd, parse_whirlpool_data, parse_raydium_data, parse_meteora_data};
 use crate::data::{unix_timestamp, PoolState, PoolStateBase, FinalizedPoolState, ProcessedPoolState};
 use std::time::Instant;
-use crate::ws_data::{
+use crate::websocket::ws_data::{
     WebSocketHandler, HasSubscriptionFields,
     HasNotificationFields, DexType,
     SlotInfo, NotificationResultFinalized,

@@ -5,21 +5,22 @@ use futures::{SinkExt, StreamExt};
 use serde_json::json;
 use tracing::{info, error, warn, debug};
 use tokio_tungstenite::tungstenite::http::Uri;
-use crate::config::METEORA_PROGRAM_ID;
-use crate::ws_parser;
+use crate::config::ORCA_PROGRAM_ID;
+use crate::websocket::ws_parser;
+use crate::data::GLOBAL_DATA;
 use crate::config::CONFIG;
 use std::time::Instant;
 use flume::Receiver;
-use crate::ws_parser::PoolCommitment;
-use crate::ws_parser::process_account_data;
-use crate::ws_data::
+use crate::websocket::ws_parser::PoolCommitment;
+use crate::websocket::ws_parser::process_account_data;
+use crate::websocket::ws_data::
 {WebSocketChannels, OrcaWebSocketChannels, DexType,
     NotificationResultFinalized, NotificationResultProcessed, 
-    ProgramNotification, OrcaFinalizedResponse, ProcessedResponse};
+    ProgramNotification, SlotInfo, OrcaFinalizedResponse, ProcessedResponse};
 
 // Переименовываем основную функцию
-pub async fn start_meteora_websocket_finalized() -> Result<(), Box<dyn std::error::Error>> {
-    info!("Starting Meteora WebSocket finalized subscriptions");
+pub async fn start_orca_websocket_finalized() -> Result<(), Box<dyn std::error::Error>> {
+    info!("Starting Orca WebSocket finalized subscriptions");
         
     let url = CONFIG.helius_websocket_url.parse::<Uri>()?;
     debug!("Connecting to WebSocket URL");
@@ -29,13 +30,13 @@ pub async fn start_meteora_websocket_finalized() -> Result<(), Box<dyn std::erro
     
     let (mut write, mut read) = ws_stream.split();
 
-    // Подписка на пулы Finalized
-    let program_subscription_clmm = json!({
+    // Удаляем подписки на аккаунты, оставляем только program и slot
+    let program_subscription = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "programSubscribe",
         "params": [
-            METEORA_PROGRAM_ID,
+            ORCA_PROGRAM_ID,
             {
                 "encoding": "base64+zstd",
                 "commitment": "finalized"
@@ -43,23 +44,34 @@ pub async fn start_meteora_websocket_finalized() -> Result<(), Box<dyn std::erro
         ]
     });
 
+    let slot_subscription = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "slotSubscribe",
+        "params": []
+    });
+
     // Отправляем подписки
     debug!("Sending program subscription request");
-    write.send(tokio_tungstenite::tungstenite::Message::Text(program_subscription_clmm.to_string())).await?;
+    write.send(tokio_tungstenite::tungstenite::Message::Text(program_subscription.to_string())).await?;
+
+    debug!("Sending slot subscription request");
+    write.send(tokio_tungstenite::tungstenite::Message::Text(slot_subscription.to_string())).await?;
 
     info!("Successfully sent all subscription requests");
 
     let (channels, receivers) = OrcaWebSocketChannels::new();
     
-    // Запускаем обработчик
+    // Запускаем обработчики (удаляем account handler)
     tokio::spawn(handle_program_notifications(receivers.program_rx));
+    tokio::spawn(handle_slot_notifications(receivers.slot_rx));
 
     // Обработка сообщений
     while let Some(msg) = read.next().await {
         match msg {
             Ok(msg) => {
                 if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
-                    // debug!("Received WebSocket message {}", text);
+                    // debug!("Received WebSocket message");
                     // let message_receive_time = Instant::now();
                     
                     match serde_json::from_str(&text) {
@@ -79,8 +91,23 @@ pub async fn start_meteora_websocket_finalized() -> Result<(), Box<dyn std::erro
                                             ws_parser::handle_program_update(
                                                 response,
                                                 &channels,
-                                                DexType::Meteora
+                                                DexType::Orca
                                             ).await;
+                                        },
+                                        Some("slotNotification") => {
+                                            if let Some(params) = response.base.params {
+                                                if let NotificationResultFinalized::Slot { slot, parent, root } = params.result {
+                                                    let slot_info = SlotInfo {
+                                                        slot,
+                                                        parent,
+                                                        root,
+                                                    };
+                                                    // Обновляем состояние сети
+                                                    GLOBAL_DATA.update_network_state(slot_info.clone());
+                                                    // Отправляем в канал для асинхронной обработки
+                                                    let _ = channels.slot_tx.send_async(slot_info).await;
+                                                }
+                                            }
                                         },
                                         Some(method) => {
                                             warn!("Received unknown notification method: {}", method);
@@ -106,8 +133,8 @@ pub async fn start_meteora_websocket_finalized() -> Result<(), Box<dyn std::erro
 }
 
 // Обработка пулов Processed
-pub async fn start_meteora_websocket_processed() -> Result<(), Box<dyn std::error::Error>> {
-    info!("Starting Meteora WebSocket processed subscriptions");
+pub async fn start_orca_websocket_processed() -> Result<(), Box<dyn std::error::Error>> {
+    info!("Starting Orca WebSocket finalized subscriptions");
         
     let url = CONFIG.helius_websocket_url.parse::<Uri>()?;
     debug!("Connecting to WebSocket URL");
@@ -118,12 +145,12 @@ pub async fn start_meteora_websocket_processed() -> Result<(), Box<dyn std::erro
     let (mut write, mut read) = ws_stream.split();
 
     // Удаляем подписки на аккаунты, оставляем только program и slot
-    let program_subscription_clmm = json!({
+    let program_subscription = json!({
         "jsonrpc": "2.0",
         "id": 3,
         "method": "programSubscribe",
         "params": [
-            METEORA_PROGRAM_ID,
+            ORCA_PROGRAM_ID,
             {
                 "encoding": "base64+zstd",
                 "commitment": "processed"
@@ -133,7 +160,7 @@ pub async fn start_meteora_websocket_processed() -> Result<(), Box<dyn std::erro
 
     // Отправляем подписки
     debug!("Sending program subscription request");
-    write.send(tokio_tungstenite::tungstenite::Message::Text(program_subscription_clmm.to_string())).await?;
+    write.send(tokio_tungstenite::tungstenite::Message::Text(program_subscription.to_string())).await?;
     info!("Successfully sent all subscription requests");
 
     let (channels, receivers) = WebSocketChannels::new();
@@ -146,7 +173,7 @@ pub async fn start_meteora_websocket_processed() -> Result<(), Box<dyn std::erro
         match msg {
             Ok(msg) => {
                 if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
-                    // debug!("Received WebSocket message {}", text);
+                    // debug!("Received WebSocket message");
                     // let message_receive_time = Instant::now();
                     
                     match serde_json::from_str(&text) {
@@ -166,7 +193,7 @@ pub async fn start_meteora_websocket_processed() -> Result<(), Box<dyn std::erro
                                             ws_parser::handle_program_update(
                                                 response,
                                                 &channels,
-                                                DexType::Meteora
+                                                DexType::Orca
                                             ).await;
                                         },
                                         Some(method) => {
@@ -208,7 +235,7 @@ async fn handle_program_notifications(rx: Receiver<OrcaFinalizedResponse>) {
                             &program_notification.account,
                             receive_time,
                             PoolCommitment::Finalized,
-                            DexType::Meteora
+                            DexType::Orca
                         ).await;
                     }
                     // info!("Program notification processed");
@@ -238,13 +265,32 @@ async fn handle_program_notifications_processed(rx: Receiver<ProcessedResponse>)
                             &program_notification.account,
                             receive_time,
                             PoolCommitment::Processed,
-                            DexType::Meteora
+                            DexType::Orca
                         ).await;
                     }
                     // info!("Program notification processed processed");
                 },
             }
         }
+    }
+}
+
+// Добавляем обработчик слотов
+async fn handle_slot_notifications(rx: Receiver<SlotInfo>) {
+    // info!("Starting slot notifications handler");
+    while let Ok(slot_info) = rx.recv_async().await {
+        // Валидация и логирование
+        if slot_info.slot < slot_info.parent {
+            warn!("Invalid slot sequence detected: slot {} is less than parent {}", 
+                  slot_info.slot, slot_info.parent);
+        }
+
+        if slot_info.parent - slot_info.root > 150 {
+            warn!("Large gap between parent and root slots: parent={}, root={}", 
+                  slot_info.parent, slot_info.root);
+        }
+
+        GLOBAL_DATA.update_network_state(slot_info);
     }
 }
 

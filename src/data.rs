@@ -7,8 +7,8 @@ use dashmap::{DashMap, DashSet};
 use log::{debug, info, warn};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::Arc;
-use crate::ws_data::{DexType, SlotInfo};
-use crate::ws_parser::PoolData;
+use crate::websocket::ws_data::{DexType, SlotInfo};
+use crate::websocket::ws_parser::PoolData;
 use crate::decoder::{WhirlpoolData, RaydiumData, MeteoraData};
 use bitvec::prelude::*;
 use hashbrown::HashMap;
@@ -332,18 +332,20 @@ pub struct GlobalData {
     pub token_addresses: Arc<DashMap<Pubkey, TokenInfo>>,
     pub token_pairs: Arc<DashSet<TokenPair>>,
     
-    // DEX-специфичные данные
+    // DEX-специфичные данные основного хранилища данных
     pub dex_pools: Arc<DashMap<DexType, DashMap<TokenPair, Vec<BasePoolInfo>>>>,
     pub processed_pool_states: Arc<DashMap<DexType, DashMap<Pubkey, ProcessedPoolState>>>,
     pub finalized_pool_states: Arc<DashMap<DexType, DashMap<Pubkey, FinalizedPoolState>>>,
+
+    // Общие данные для сети по ключу DexType (не понятно чем отличаются
     pub network_states: Arc<DashMap<DexType, NetworkState>>,
+    // Общие данные для сети по ключу String (не понятно чем отличаются)
+    pub network_state: Arc<DashMap<String, NetworkState>>,
     
     // Общие данные для маршрутизации
     pub liquidity_edges: Arc<DashMap<Pubkey, Vec<LiquidityEdge>>>,
     // Кэш популярных маршрутов
     pub route_cache: Arc<DashMap<(Pubkey, Pubkey), Vec<Route>>>,
-
-    pub network_state: Arc<DashMap<String, NetworkState>>,
     // Структура для хранения быстрого доступа к пулам
     pool_lookup: PoolLookupTable,
 }

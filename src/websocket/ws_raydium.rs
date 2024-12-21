@@ -6,13 +6,13 @@ use serde_json::json;
 use tracing::{info, error, warn, debug};
 use tokio_tungstenite::tungstenite::http::Uri;
 use crate::config::{RAYDIUM_CLMM_PROGRAM_ID, RAYDIUM_V4_PROGRAM_ID};
-use crate::ws_parser;
+use crate::websocket::ws_parser;
 use crate::config::CONFIG;
 use std::time::Instant;
 use flume::Receiver;
-use crate::ws_parser::PoolCommitment;
-use crate::ws_parser::process_account_data;
-use crate::ws_data::
+use crate::websocket::ws_parser::PoolCommitment;
+use crate::websocket::ws_parser::process_account_data;
+use crate::websocket::ws_data::
 {WebSocketChannels, OrcaWebSocketChannels, DexType,
     NotificationResultFinalized, NotificationResultProcessed, 
     ProgramNotification, OrcaFinalizedResponse, ProcessedResponse};
