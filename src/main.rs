@@ -7,7 +7,10 @@ mod fetch_address;
 mod decoder;
 mod websocket;
 mod shred;
+mod graph;
+mod math;
 
+#[allow(unused_imports)]
 use log::{info, error};
 use crate::data::GLOBAL_DATA;
 use crate::websocket::ws_data::DexType;
@@ -17,6 +20,7 @@ use crate::websocket::ws_raydium::{start_raydium_websocket_finalized, start_rayd
 use crate::websocket::ws_meteora::{start_meteora_websocket_finalized, start_meteora_websocket_processed};
 
 use crate::config::{INITIALIZE_HTTP_CLIENT, get_config, DEFAULT_QUOTE_API_URL};
+#[allow(unused_imports)]
 use crate::shred::test_udp_connection;
 use crate::fetch_address::start_fetching;
 
@@ -43,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::set_var("QUOTE_API_URL", DEFAULT_QUOTE_API_URL);
         info!("Используем стандартный Jupiter API URL");
     }
-
+/*
     // Запуск Shred Stream
     info!("Запуск Shred Stream...");
     tokio::spawn(async {
@@ -51,7 +55,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     info!("Shred Stream запущен");
 
-/*
     tokio::spawn(async {
         if let Err(e) = test_udp_connection().await {
             error!("Ошибка тестирования UDP: {}", e);
@@ -59,7 +62,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 */
 
-/*
     // Проверяем и загружаем файлы пулов
     config::check_pools().await?;
     info!("Проверка пулов завершена");
@@ -74,7 +76,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     GLOBAL_DATA.initialize_pool_states(DexType::Raydium);
     GLOBAL_DATA.initialize_pool_states(DexType::Meteora);
 
-
+    info!("Запуск построения графа и поиска цепочек...");
+    graph::build_and_find_chains();
+    info!("Построение графа и поиск цепочек завершены");
+/*
     // TODO: Запуск RPC вызова для получения актуальных данных
 
     // TODO: Запуск построения графов 
@@ -86,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Запускаем тестирование Orca Whirlpool
     // info!("Запуск тестирования Orca Whirlpool...");
     // quote::test_valid_pools().await?;
-
+*/ 
 
     // Запуск подписки на пулах Finalized в отдельной задаче
     tokio::spawn(async {
@@ -117,7 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async {
         let _ = start_meteora_websocket_processed().await;
     });
-*/ 
+
     // Держим главный поток активным
     tokio::signal::ctrl_c().await.unwrap();
 

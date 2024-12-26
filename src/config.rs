@@ -20,26 +20,13 @@ static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
 pub const INITIALIZE_HTTP_CLIENT: bool = false;
 #[allow(dead_code)]
 pub const DEFAULT_QUOTE_API_URL: &str = "https://quote-api.jup.ag/v6";
-#[allow(dead_code)]
-pub const H2_INITIAL_WINDOW_SIZE: u32 = 1024 * 1024 * 2; // 2MB для локального соединения
-
-// Константы для батчинга и rate limiting
-#[allow(dead_code)]
-pub const BATCH_SIZE: usize = 125;           // Размер батча для RPC запросов
-#[allow(dead_code)]
-pub const RATE_LIMIT: u32 = 450;             // Максимальное количество запросов
-#[allow(dead_code)]
-pub const RATE_LIMIT_REFRESH: u64 = 1;       // Время обновления rate limit в секундах
-
-// Константы для параллельной обработки
-#[allow(dead_code)]
-pub const WORKER_THREADS: usize = 4;         // Количество воркеров
-#[allow(dead_code)]
-pub const CPU_CORES: usize = 4;              // Количество ядер системы
 
 // Константы для фильтрации пулов
 pub const MIN_TVL: f64 = 100000.0;             // Минимальный TVL для пула
-pub const INITIAL_TOKENS: [&str; 3] = ["SOL", "USDC", "USDT"];  // Начальные токены для торговли
+pub const INITIAL_TOKENS: [&str; 8] = ["SOL", "USDC", "USDT", "JUP", "ETH", "WETH", "JTO", "PYTH"];  // Начальные токены для торговли
+pub const MAX_CHAIN_LENGTH: usize = 5;       // Максимальная длина цепочки включительно
+pub const MIN_CHAIN_LENGTH: usize = 3;       // Минимальная длина цепочки включительно
+pub const START_END_TOKEN_FOR_CHAINS: [&str; 1] = ["SOL"]; // Начальный и конечный токен для построения цепочек
 
 // Добавим константы для URL скачивания пулов   
 pub const METEORA_POOLS_URL: &str = "https://dlmm-api.meteora.ag/pair/all";

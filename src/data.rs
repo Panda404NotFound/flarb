@@ -13,18 +13,10 @@ use crate::decoder::{WhirlpoolData, RaydiumData, MeteoraData};
 use bitvec::prelude::*;
 use hashbrown::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
-
-// TODO: Добавить структуру для Meteora пулов
-
-/* 
-Добавить реализацию OrcaPoolStateBase для переменной is dead или изменить логику
-потому что для разных пулов разные параметры мервтого пула. 
-
-Проверить реализацию OrcaPoolStateBase потому что для каждого Dex может быть 
-разные параметры переменных пула.
-*/
-
-
+use petgraph::Graph;
+use crate::graph::PoolEdge;
+use crate::math::{PoolMetrics, calculators, update_pool_metrics};
+use crate::math::weight_calculators::{calculate_orca_weight, calculate_raydium_weight, calculate_meteora_weight};
 
 // Структура для хранения информации о токене
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, Eq, PartialEq)]
@@ -200,17 +192,6 @@ pub struct MeteoraPoolStateBase {
     pub fees_24h: u64,                
 }
 
-// TODO: Метрики для MEV
-
-// pub price_impact_threshold: f64,
-// pub execution_probability: f64,
-// pub slippage_tolerance: f64,
-
-// TODO: Добавить структуры для geyser Mev :
-// pub struct PriceImpactEvent;  // Событие влияния на цену
-// pub struct LiquidityEvent;    // Событие изменения ликвидности
-// pub struct ArbitrageEvent;    // Событие арбитражной возможности
-
 // Состояние для Processed данных
 #[derive(Debug, Clone)]
 pub struct ProcessedPoolState {
@@ -348,6 +329,17 @@ pub struct GlobalData {
     pub route_cache: Arc<DashMap<(Pubkey, Pubkey), Vec<Route>>>,
     // Структура для хранения быстрого доступа к пулам
     pool_lookup: PoolLookupTable,
+
+    // Структуры для хранения цепочек
+    pub chains_4: Arc<DashSet<Vec<String>>>,
+    pub chains_5: Arc<DashSet<Vec<String>>>,
+
+    // Графы для processed и finalized состояний
+    pub processed_graph: Arc<DashMap<String, Graph<String, PoolEdge>>>,
+    pub finalized_graph: Arc<DashMap<String, Graph<String, PoolEdge>>>,
+    
+    // Метрики пулов
+    pub pool_metrics: Arc<DashMap<Pubkey, PoolMetrics>>,
 }
 
 // Глобальный экземпляр данных
@@ -364,6 +356,11 @@ lazy_static! {
         route_cache: Arc::new(DashMap::new()),
         network_state: Arc::new(DashMap::new()),
         pool_lookup: PoolLookupTable::new(),
+        chains_4: Arc::new(DashSet::new()),
+        chains_5: Arc::new(DashSet::new()),
+        processed_graph: Arc::new(DashMap::new()),
+        finalized_graph: Arc::new(DashMap::new()),
+        pool_metrics: Arc::new(DashMap::new()),
     };
 }
 
@@ -397,7 +394,7 @@ impl GlobalData {
             address,
         };
         
-        debug!("Добавление токена: {} с адресом {}", symbol, address);
+        // debug!("Добавление токена: {} с адресом {}", symbol, address);
         
         // Сохраняем токен в обоих мапах для быстрого доступа
         self.tokens.insert(symbol, token_info.clone());
@@ -422,7 +419,7 @@ impl GlobalData {
                 }
             };
             
-            debug!("Добавление пары токенов: {:?}", pair);
+            // debug!("Добавление пары токенов: {:?}", pair);
             self.token_pairs.insert(pair);
         }
     }
@@ -461,7 +458,7 @@ impl GlobalData {
                 }
             };
 
-            info!("Добавление пула для пары {:?} с адресом {}", pair, pool_address);
+            // info!("Добавление пула для пары {:?} с адресом {}", pair, pool_address);
             
             // Используем dex_pools 
             self.dex_pools
@@ -477,7 +474,7 @@ impl GlobalData {
             unsafe {
                 (*(&self.pool_lookup as *const _ as *mut PoolLookupTable)).insert_pool(dex, pool_address);
             }
-            info!("Добавление пула с адресом {} в PoolLookupTable", pool_address);
+            // info!("Добавление пула с адресом {} в PoolLookupTable", pool_address);
 
             true
         } else {
@@ -486,73 +483,10 @@ impl GlobalData {
         }
     }
 
-    #[allow(dead_code)]
-    // Вспомогательные методы для получения информации про пул через токен символ
-    pub fn get_pools_by_token_symbol(&self, symbol: &str) -> Vec<(TokenPair, Vec<BasePoolInfo>)> {
-        let mut result = Vec::new();
-        
-        if let Some(orca_pools) = self.dex_pools.get(&DexType::Orca) {
-            for entry in orca_pools.iter() {
-                let pair = entry.key();
-                if pair.token_a.symbol == symbol || pair.token_b.symbol == symbol {
-                    result.push((pair.clone(), entry.value().clone()));
-                }
-            }
-        }
-        
-        result
-    }
-
-    #[allow(dead_code)]
-    // Вспомогательные методы для получения информации про пул через токен адресс
-    pub fn get_pools_by_token_address(&self, address: &Pubkey) -> Vec<(TokenPair, Vec<BasePoolInfo>)> {
-        let mut result = Vec::new();
-        
-        if let Some(orca_pools) = self.dex_pools.get(&DexType::Orca) {
-            for entry in orca_pools.iter() {
-                let pair = entry.key();
-                if pair.token_a.address == *address || pair.token_b.address == *address {
-                    result.push((pair.clone(), entry.value().clone()));
-                }
-            }
-        }
-        
-        result
-    }
-
     // Проверка существования пула
     pub fn pool_exists(&self, dex: DexType, pool_address: &Pubkey) -> bool {
         // info!("Checking if pool exists for dex: {:?}, pool_address: {:?}", dex, pool_address);
         self.pool_lookup.exists(dex, pool_address)
-    }
-
-    #[allow(dead_code)]
-    // Добавление ребра ликвидности
-    // TODO: Реализовать логику для добавления ребра ликвидности
-    pub fn add_liquidity_edge(
-        &self,
-        edge: LiquidityEdge
-    ) {
-        debug!("Добавление ребра ликвидности: {} -> {}", 
-               edge.token_in.symbol, edge.token_out.symbol);
-               
-        self.liquidity_edges
-            .entry(edge.token_in.address)
-            .or_default()
-            .push(edge);
-    }
-
-    #[allow(dead_code)]
-    // Обновление кэша популярных маршрутов
-    // TODO: Реализовать логику для обновления кэша популярных маршрутов
-    pub fn update_route_cache(
-        &self,
-        token_in: Pubkey,
-        token_out: Pubkey,
-        routes: Vec<Route>
-    ) {
-        debug!("Обновление кэша маршрутов для {} -> {}", token_in, token_out);
-        self.route_cache.insert((token_in, token_out), routes);
     }
 
     #[allow(dead_code)]
@@ -610,13 +544,86 @@ impl GlobalData {
         if let Some(state) = self.network_state.get("current") {
             if state.current_slot > update_slot + 10 {
                 // warn!("Processing outdated data: current_slot={}, update_slot={}", state.current_slot, update_slot);
-                return false;
+                // return false;
             }
             true
         } else {
             // Если состояние еще не инициализировано, пропускаем валидацию
             true
         }
+    }
+
+    /// Находит адрес пула по символам токенов
+    pub fn find_pool_address_by_symbols(&self, dex: DexType, symbol_a: &str, symbol_b: &str) -> Option<Pubkey> {
+        // Получаем TokenInfo для обоих символов
+        let token_a = self.tokens.get(symbol_a)?;
+        let token_b = self.tokens.get(symbol_b)?;
+
+        // Ищем пул в обоих вариантах порядка токенов
+        if let Some(dex_pools) = self.dex_pools.get(&dex) {
+            // Пробуем первый вариант порядка
+            let pair1 = TokenPair {
+                token_a: token_a.clone(),
+                token_b: token_b.clone(),
+            };
+            
+            // Пробуем второй вариант порядка
+            let pair2 = TokenPair {
+                token_a: token_b.clone(),
+                token_b: token_a.clone(),
+            };
+
+            // Проверяем оба варианта
+            if let Some(pool_infos) = dex_pools.get(&pair1) {
+                if let Some(first_pool) = pool_infos.first() {
+                    return Some(first_pool.pool_address);
+                }
+            }
+
+            if let Some(pool_infos) = dex_pools.get(&pair2) {
+                if let Some(first_pool) = pool_infos.first() {
+                    return Some(first_pool.pool_address);
+                }
+            }
+        }
+        None
+    }
+
+    // Находит адрес пула по адресам токенов
+    #[allow(dead_code)]
+    pub fn find_pool_address_by_addresses(&self, dex: DexType, address_a: &Pubkey, address_b: &Pubkey) -> Option<Pubkey> {
+        // Получаем TokenInfo для обоих адресов
+        let token_a = self.token_addresses.get(address_a)?;
+        let token_b = self.token_addresses.get(address_b)?;
+
+        // Ищем пул в обоих вариантах порядка токенов
+        if let Some(dex_pools) = self.dex_pools.get(&dex) {
+            // Пробуем первый вариант порядка
+            let pair1 = TokenPair {
+                token_a: token_a.clone(),
+                token_b: token_b.clone(),
+            };
+            
+            // Пробуем второй вариант порядка
+            let pair2 = TokenPair {
+                token_a: token_b.clone(),
+                token_b: token_a.clone(),
+            };
+
+            // Проверяем оба варианта
+            if let Some(pool_infos) = dex_pools.get(&pair1) {
+                if let Some(first_pool) = pool_infos.first() {
+                    return Some(first_pool.pool_address);
+                }
+            }
+
+            if let Some(pool_infos) = dex_pools.get(&pair2) {
+                if let Some(first_pool) = pool_infos.first() {
+                    return Some(first_pool.pool_address);
+                }
+            }
+        }
+        None
     }
 }
 
@@ -768,7 +775,55 @@ impl OrcaPoolStateBase {
             updated = true;
         }
 
+        if updated {
+            // Создаем новые метрики
+            let new_metrics = PoolMetrics {
+                price: calculators::calculate_orca_price(self.sqrt_price),
+                liquidity: self.liquidity as f64,
+                fee_rate: self.fee_rate as f64 / 10_000.0,
+            };
+            
+            self.update_pool_edge(new_metrics);
+        }
+        
         updated
+    }
+
+    fn update_pool_edge(&self, metrics: PoolMetrics) {
+        // Обновляем метрики в глобальном хранилище
+        if update_pool_metrics(self.pool_address, metrics.clone(), 
+            GLOBAL_DATA.pool_metrics.get(&self.pool_address).as_deref()) {
+            
+            // Обновляем ребро в обоих графах
+            for graph in [&GLOBAL_DATA.processed_graph, &GLOBAL_DATA.finalized_graph] {
+                if let Some(mut g) = graph.get_mut("main") {
+                    if let Some(edge_idx) = g.edge_indices()
+                        .find(|&e| g[e].pool_address == self.pool_address) {
+                        
+                        let edge = &mut g[edge_idx];
+                        edge.price = metrics.price;
+                        edge.fee_rate = metrics.fee_rate;
+                        edge.liquidity = metrics.liquidity;
+                        edge.is_active = true;
+                        
+                        debug!("Новые метрики: price={}, fee_rate={}, liquidity={}", metrics.price, metrics.fee_rate, metrics.liquidity);
+                        
+                        // Рассчитываем вес для Orca
+                        edge.weight = calculate_orca_weight(
+                            edge.price,
+                            edge.fee_rate,
+                            edge.liquidity,
+                            self.tick_spacing // используем tick_spacing вместо volume_24h
+                        );
+                        debug!("Рассчитали вес для Orca пула {}: {}", self.pool_address, edge.weight);
+                    }
+                }
+            }
+            
+            // Сохраняем новые метрики
+            GLOBAL_DATA.pool_metrics.insert(self.pool_address, metrics);
+            debug!("Обновили метрики пула: {}", self.pool_address);
+        }
     }
 
     pub fn from_whirlpool(pool_address: Pubkey, data: &WhirlpoolData) -> Self {
@@ -908,7 +963,59 @@ impl RaydiumPoolStateBase {
             updated = true;
         }
 
+        if updated {
+            // Создаем новые метрики
+            let new_metrics = PoolMetrics {
+                price: calculators::calculate_raydium_price(self.min_price, self.max_price),
+                liquidity: self.total_lp as f64,
+                fee_rate: calculators::calculate_raydium_fee(
+                    self.fee_numerator,
+                    self.fee_denominator
+                ),
+            };
+            
+            self.update_pool_edge(new_metrics);
+        }
+
         updated
+    }
+
+    fn update_pool_edge(&self, metrics: PoolMetrics) {
+        if update_pool_metrics(self.pool_address, metrics.clone(), 
+            GLOBAL_DATA.pool_metrics.get(&self.pool_address).as_deref()) {
+            
+            // Обновляем ребро в обоих графах
+            for graph in [&GLOBAL_DATA.processed_graph, &GLOBAL_DATA.finalized_graph] {
+                if let Some(mut g) = graph.get_mut("main") {
+                    if let Some(edge_idx) = g.edge_indices()
+                        .find(|&e| g[e].pool_address == self.pool_address) {
+                        
+                        let edge = &mut g[edge_idx];
+                        edge.price = metrics.price;
+                        edge.fee_rate = metrics.fee_rate;
+                        edge.liquidity = metrics.liquidity;
+                        // Для Raydium проверяем статус и pool_state
+                        edge.is_active = self.status != 0 && self.pool_state != 0;
+
+                        debug!("Новые метрики для Raydium: price={}, fee_rate={}, liquidity={}", metrics.price, metrics.fee_rate, metrics.liquidity);         
+
+                        // Рассчитываем вес для Raydium
+                        edge.weight = calculate_raydium_weight(
+                            edge.price,
+                            edge.fee_rate,
+                            edge.liquidity,
+                            self.orders_num,
+                            self.depth
+                        );
+                        debug!("Рассчитали вес для Raydium: {}", edge.weight);
+                    }
+                }
+            }
+            
+            // Сохраняем новые метрики
+            GLOBAL_DATA.pool_metrics.insert(self.pool_address, metrics);
+            debug!("Сохранили новые метрики пула raydium: {}", self.pool_address);
+        }
     }
 
     pub fn from_raydium(pool_address: Pubkey, data: &RaydiumData) -> Self {
@@ -1092,7 +1199,56 @@ impl MeteoraPoolStateBase {
             updated = true;
         }
 
+        if updated {
+            let new_metrics = PoolMetrics {
+                price: calculators::calculate_meteora_price(self.sqrt_price),
+                liquidity: self.liquidity as f64,
+                fee_rate: self.fee_rate as f64 / 10_000.0,
+            };
+            
+            self.update_pool_edge(new_metrics);
+        }
+
         updated
+    }
+
+    fn update_pool_edge(&self, metrics: PoolMetrics) {
+        // Обновляем метрики в глобальном хранилище
+        if update_pool_metrics(self.pool_address, metrics.clone(), 
+            GLOBAL_DATA.pool_metrics.get(&self.pool_address).as_deref()) {
+            
+            // Обновляем ребро в обоих графах
+            for graph in [&GLOBAL_DATA.processed_graph, &GLOBAL_DATA.finalized_graph] {
+                if let Some(mut g) = graph.get_mut("main") {
+                    if let Some(edge_idx) = g.edge_indices()
+                        .find(|&e| g[e].pool_address == self.pool_address) {
+                        
+                        let edge = &mut g[edge_idx];
+                        edge.price = metrics.price;
+                        edge.fee_rate = metrics.fee_rate;
+                        edge.liquidity = metrics.liquidity;
+                        // Для Meteora проверяем режим ликвидности
+                        edge.is_active = self.dynamic_liquidity_mode != 0 
+                            && self.liquidity_cap > 0;
+
+                        debug!("Новые метрики для Meteora: price={}, fee_rate={}, liquidity={}", metrics.price, metrics.fee_rate, metrics.liquidity);
+                        
+                        // Рассчитываем вес для Meteora
+                        edge.weight = calculate_meteora_weight(
+                            edge.price,
+                            edge.fee_rate,
+                            edge.liquidity,
+                            self.liquidity_multiplier
+                        );
+                        debug!("Рассчитали вес для Meteora: {}", edge.weight);
+                    }
+                }
+            }
+            
+            // Сохраняем новые метрики
+            GLOBAL_DATA.pool_metrics.insert(self.pool_address, metrics);
+            debug!("Сохранили новые метрики пула meteora: {}", self.pool_address);
+        }
     }
 
     pub fn from_meteora(pool_address: Pubkey, data: &MeteoraData) -> Self {

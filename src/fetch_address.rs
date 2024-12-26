@@ -23,7 +23,7 @@ pub async fn start_fetching() -> Result<()> {
         if let Some(token_data) = find_token_in_json(&tokens, token) {
             let address = Pubkey::from_str(&token_data.0)?;
             GLOBAL_DATA.add_token(token_data.1.clone(), address);
-            debug!("Добавлен токен {} с адресом {}", token, address);
+            // debug!("Добавлен токен {} с адресом {}", token, address);
         } else {
             warn!("Токен {} не найден в JSON", token);
         }
@@ -36,7 +36,7 @@ pub async fn start_fetching() -> Result<()> {
                 INITIAL_TOKENS[i].to_string(),
                 INITIAL_TOKENS[j].to_string()
             );
-            debug!("Создана пара токенов: {} - {}", INITIAL_TOKENS[i], INITIAL_TOKENS[j]);
+            // debug!("Создана пара токенов: {} - {}", INITIAL_TOKENS[i], INITIAL_TOKENS[j]);
         }
     }
     
@@ -278,7 +278,7 @@ fn find_token_in_json(tokens: &Value, symbol: &str) -> Option<(String, String)> 
     if let Value::Array(token_list) = tokens {
         for token in token_list {
             if token["symbol"].as_str() == Some(symbol) {
-                debug!("Токен {} найден", symbol);
+                // debug!("Токен {} найден", symbol);
                 return Some((
                     token["address"].as_str()?.to_string(),
                     token["symbol"].as_str()?.to_string()

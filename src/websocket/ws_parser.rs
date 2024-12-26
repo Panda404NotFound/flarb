@@ -162,7 +162,7 @@ pub async fn process_account_data(
                                     if let Some(mut state) = states.get_mut(&pubkey) {
                                         // debug!("State {:?}", state);
                                         state.update(&pool_data, slot);
-                                        info!("Pool PoolCommitment {:?} updated in {:?} for dex {:?}", commitment, processing_start.elapsed(), dex);
+                                        // info!("Pool PoolCommitment {:?} updated in {:?} for dex {:?}", commitment, processing_start.elapsed(), dex);
                                     } else {
                                         let base = PoolStateBase::from_pool_data(pubkey, &pool_data);
                                         // debug!("Base {:?}", base);
@@ -171,7 +171,7 @@ pub async fn process_account_data(
                                             finalized_slot: slot,
                                             last_update_time: unix_timestamp(),
                                         });
-                                        info!("Pool PoolCommitment {:?} updated in {:?} for dex {:?}", commitment, processing_start.elapsed(), dex);
+                                        // info!("Pool PoolCommitment {:?} updated in {:?} for dex {:?}", commitment, processing_start.elapsed(), dex);
                                     }
                                 }
                             },
@@ -182,7 +182,7 @@ pub async fn process_account_data(
                                     if let Some(mut state) = states.get_mut(&pubkey) {
                                         // debug!("State {:?}", state);
                                         state.update(&pool_data, slot);
-                                        info!("Pool PoolCommitment {:?} updated in {:?} for dex {:?}", commitment, processing_start.elapsed(), dex);
+                                        // info!("Pool PoolCommitment {:?} updated in {:?} for dex {:?}", commitment, processing_start.elapsed(), dex);
                                     } else {
                                         let base = PoolStateBase::from_pool_data(pubkey, &pool_data);
                                         // debug!("Base {:?}", base);
@@ -191,7 +191,7 @@ pub async fn process_account_data(
                                             processed_slot: slot,
                                             last_update_time: unix_timestamp(),
                                         });
-                                        info!("Pool PoolCommitment {:?} updated in {:?} for dex {:?}", commitment, processing_start.elapsed(), dex);
+                                        // info!("Pool PoolCommitment {:?} updated in {:?} for dex {:?}", commitment, processing_start.elapsed(), dex);
                                     }
                                 }
                             }
