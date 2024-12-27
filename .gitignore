@@ -8,9 +8,9 @@ jito.txt
 tvu_jito_help.txt
 package-lock.json
 Cargo.lock
-markets/orca_pools.json
-markets/raydium_pools.json
-markets/tokens.json
-markets/pools.json
+pools/orca_pools.json
+pools/raydium_pools.json
+pools/tokens.json
+pools/pools.json
 jupiter-swap-api/cache
 backup
