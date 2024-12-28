@@ -27,8 +27,8 @@ use crate::fetch_address::start_fetching;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
-    // Initialize only tracing subscriber
-    tracing_subscriber::fmt::init();
+    // Инициализация только подсистемы логирования
+    init_logging!();
 
     // Инициализируем конфигурацию
     let config = get_config();
@@ -62,6 +62,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 */
 
+    // Инициализация структуры DEX для пулов
+    GLOBAL_DATA.initialize_pool_states(DexType::Orca);
+    GLOBAL_DATA.initialize_pool_states(DexType::Raydium);
+    GLOBAL_DATA.initialize_pool_states(DexType::Meteora);
+
     // Проверяем и загружаем файлы пулов
     config::check_pools().await?;
     info!("Проверка пулов завершена");
@@ -70,11 +75,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Запуск парсера адресов DEX...");
     start_fetching().await?;
     info!("Парсинг адресов DEX завершен");
-
-    // Инициализация структуры DEX для пулов
-    GLOBAL_DATA.initialize_pool_states(DexType::Orca);
-    GLOBAL_DATA.initialize_pool_states(DexType::Raydium);
-    GLOBAL_DATA.initialize_pool_states(DexType::Meteora);
 
     info!("Запуск построения графа и поиска цепочек...");
     graph::build_and_find_chains();

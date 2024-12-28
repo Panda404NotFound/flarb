@@ -23,6 +23,7 @@ pub const DEFAULT_QUOTE_API_URL: &str = "https://quote-api.jup.ag/v6";
 
 // Константы для фильтрации пулов
 pub const MIN_TVL: f64 = 100000.0;             // Минимальный TVL для пула
+pub const INITIAL_BALANCE: u64 = 100_000_000_000; // Константа начального баланса 100 SOL в лампортах
 pub const INITIAL_TOKENS: [&str; 8] = ["SOL", "USDC", "USDT", "JUP", "ETH", "WETH", "JTO", "PYTH"];  // Начальные токены для торговли
 pub const MAX_CHAIN_LENGTH: usize = 5;       // Максимальная длина цепочки включительно
 pub const MIN_CHAIN_LENGTH: usize = 3;       // Минимальная длина цепочки включительно
@@ -118,33 +119,72 @@ pub fn initialize_http_client() -> &'static Client {
         );
         
         // HTTP/2 specific headers
-        headers.insert(
-            header::CONNECTION,
-            header::HeaderValue::from_static("keep-alive"),
-        );
+        // headers.insert(
+        //     header::CONNECTION,
+        //     header::HeaderValue::from_static("keep-alive"),
+        // );
         
         Client::builder()
             .default_headers(headers)
-            // Отключаем таймаут простоя - соединение будет поддерживаться постоя��но
-            .pool_idle_timeout(None)
-            // Держим только одно соединение на хост для эффективного переиспользования
+            // При желании можно оставить pool_idle_timeout(None), но обычно лучше позволить соединениям закрываться
+            // .pool_idle_timeout(None)
             .pool_max_idle_per_host(1)
-            // Принудительно используем HTTP/2
-            .http2_prior_knowledge()
-            // Настройки TCP для стабильного соединения
+            // Убираем http2_prior_knowledge(), позволяя автоматический ALPN (HTTP/1.1 или HTTP/2)
+            // .http2_prior_knowledge()
+            // Также можно убрать или оставить настройки HTTP/2, 
+            // но для устранения конфликтов стоит убрать явно:
+            // .http2_keep_alive_interval(Duration::from_secs(30))
+            // .http2_keep_alive_timeout(Duration::from_secs(10))
+            // .http2_adaptive_window(true)
+            // Таймаут запроса
+            .timeout(Duration::from_secs(30))
+            // Настройки TCP
             .tcp_keepalive(Some(Duration::from_secs(300)))
             .tcp_nodelay(true)
             // Увеличиваем таймаут запроса до разумного значения
-            .timeout(Duration::from_secs(30))
+            // .timeout(Duration::from_secs(30))
             // Настройки HTTP/2
-            .http2_keep_alive_interval(Duration::from_secs(30))
-            .http2_keep_alive_timeout(Duration::from_secs(10))
-            .http2_adaptive_window(true)
+            // .http2_keep_alive_interval(Duration::from_secs(30))
+            // .http2_keep_alive_timeout(Duration::from_secs(10))
+            // .http2_adaptive_window(true)
             .build()
             .expect("Failed to create HTTP client")
     })
 }
 
+// Загрузка файла пула
+async fn download_pool(name: &str, url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    info!("Загрузка {} через reqwest", name);
+    
+    let path = format!("pools/{}", name);
+
+    // Делаем GET-запрос через общий HTTP клиент
+    let client = get_http_client();
+    let response = client
+        .get(url)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        return Err(format!("Ошибка при скачивании {}: код HTTP {}", name, status).into());
+    }
+
+    // Считываем ответ в строку
+    let body = response.text().await?;
+    
+    // Парсим полученную строку, проверяем JSON
+    let parsed: serde_json::Value = serde_json::from_str(&body)?;
+    
+    // Форматируем и пишем в целевой файл
+    let formatted = serde_json::to_string_pretty(&parsed)?;
+    fs::write(&path, formatted).await?;
+
+    info!("Файл {} успешно загружен и сохранен", name);
+    Ok(())
+}
+
+// Проверка и загрузка файлов пулов
 pub async fn check_pools() -> Result<(), Box<dyn std::error::Error>> {
     info!("Начинаем проверку файлов пулов");
     
@@ -155,7 +195,7 @@ pub async fn check_pools() -> Result<(), Box<dyn std::error::Error>> {
         PoolFile { name: "tokens.json", url: TOKENS_URL },
     ];
 
-    // Создаем директорию pools если её нет
+    // Создаем директорию pools, если она не существует
     if !Path::new("pools").exists() {
         fs::create_dir("pools").await?;
         info!("Создана директория pools/");
@@ -240,7 +280,9 @@ pub async fn check_pools() -> Result<(), Box<dyn std::error::Error>> {
         pb.enable_steady_tick(std::time::Duration::from_millis(120));
 
         // Повторная попытка загрузки
-        let retry_results = join_all(failed_downloads.iter().map(|pool| download_pool(pool.name, pool.url))).await;
+        let retry_results = join_all(
+            failed_downloads.iter().map(|pool| download_pool(pool.name, pool.url))
+        ).await;
         
         // Проверяем результаты повторной попытки
         for (i, result) in retry_results.iter().enumerate() {
@@ -257,32 +299,5 @@ pub async fn check_pools() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     info!("Все файлы успешно загружены");
-    Ok(())
-}
-
-async fn download_pool(name: &str, url: &str) -> Result<(), Box<dyn std::error::Error>> {
-    info!("Загрузка {} через curl", name);
-    
-    let path = format!("pools/{}", name);
-    
-    // Создаем команду curl с флагом -f для возврата ошибки при неудачном запросе
-    let output = tokio::process::Command::new("curl")
-        .arg("-f")  // Fail silently on HTTP errors
-        .arg(url)
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        let error = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Ошибка загрузки {}: {}", name, error).into());
-    }
-
-    // Сохраняем ответ в файл через jq
-    let json_str = String::from_utf8(output.stdout)?;
-    let parsed: serde_json::Value = serde_json::from_str(&json_str)?;
-    let formatted = serde_json::to_string_pretty(&parsed)?;
-    fs::write(&path, formatted).await?;
-
-    info!("Файл {} успешно загружен и сохранен", name);
     Ok(())
 }

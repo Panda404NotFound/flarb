@@ -6,6 +6,8 @@ use solana_program::pubkey::Pubkey;
 
 use crate::data::GLOBAL_DATA;
 use crate::websocket::ws_data::DexType;
+use crate::data::PoolStateBase;
+use crate::math::weight_calculators::{calculate_orca_weight, calculate_raydium_weight, calculate_meteora_weight};
 
 const MIN_LEN: usize = crate::config::MIN_CHAIN_LENGTH; 
 const MAX_LEN: usize = crate::config::MAX_CHAIN_LENGTH;
@@ -20,6 +22,46 @@ pub struct PoolEdge {
     pub fee_rate: f64, 
     pub liquidity: f64,
     pub is_active: bool,
+    pub current_amount: u64, // Добавляем текущий баланс для цепочки
+    pub chain_position: Option<usize>, // Позиция в цепочке
+}
+
+// Добавляем имплементацию для работы с весами
+impl PoolEdge {
+    pub fn update_weight(&mut self, pool_state: &PoolStateBase) -> bool {
+        let old_weight = self.weight;
+        
+        self.weight = match pool_state {
+            PoolStateBase::Orca(state) if state.is_active => {
+                calculate_orca_weight(
+                    self.price,
+                    self.fee_rate,
+                    self.liquidity,
+                    state.tick_spacing
+                )
+            },
+            PoolStateBase::Raydium(state) if state.status != 0 => {
+                calculate_raydium_weight(
+                    self.price,
+                    self.fee_rate,
+                    self.liquidity,
+                    state.orders_num,
+                    state.depth
+                )
+            },
+            PoolStateBase::Meteora(state) if state.dynamic_liquidity_mode != 0 => {
+                calculate_meteora_weight(
+                    self.price,
+                    self.fee_rate,
+                    self.liquidity,
+                    state.liquidity_multiplier
+                )
+            },
+            _ => 0.0
+        };
+
+        self.weight != old_weight
+    }
 }
 
 // Добавим новую структуру для хранения валидных пар
@@ -55,7 +97,7 @@ pub fn build_and_find_chains() {
     let valid_tokens = validate_tokens_across_dex(&initial_tokens);
     
     if valid_tokens.len() != initial_tokens.len() {
-        info!("Обнаружены невалидные токены. Продолжаем работу с валидными токенами: {:?}", valid_tokens);
+        warn!("Обнаружены невалидные токены. Продолжаем только с {} из {} токенов", valid_tokens.len(), initial_tokens.len());
     }
 
     // Проверяем что стартовый токен валидный
@@ -117,7 +159,7 @@ pub fn build_and_find_chains() {
             for i in 0..chain_len-1 {
                 if !valid_pairs.is_valid_pair(&chain[i], &chain[i+1]) {
                     is_valid_chain = false;
-                    debug!("Невалидная пара в ��епочке: {} -> {}", chain[i], chain[i+1]);
+                    warn!("Невалидная пара в цепочке: {} -> {}. Возможна проблема с ликвидностью или активностью пула", chain[i], chain[i+1]);
                     break;
                 }
             }
@@ -306,6 +348,8 @@ pub fn build_and_find_chains() {
                                 fee_rate: 0.0,
                                 liquidity: 0.0,
                                 is_active: true,
+                                current_amount: 0,
+                                chain_position: None,
                             });
                         }
                     }
