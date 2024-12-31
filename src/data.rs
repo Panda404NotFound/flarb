@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use solana_program::pubkey::Pubkey;
 use lazy_static::lazy_static;
 use dashmap::{DashMap, DashSet};
-use log::{debug, info, warn};
+use log::{debug, info, warn, error};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::Arc;
 use crate::websocket::ws_data::{DexType, SlotInfo};
@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use petgraph::Graph;
 use crate::graph::PoolEdge;
 use crate::config::INITIAL_BALANCE;
-use crate::math::{PoolMetrics, calculators, update_pool_metrics};
+use crate::math::calculators;
 use crate::math::weight_calculators::{calculate_orca_weight, calculate_raydium_weight, calculate_meteora_weight};
 
 // Структура для хранения информации о токене
@@ -52,6 +52,7 @@ pub struct LiquidityEdge {
 }
 
 // Структура для хранения информации о маршруте
+// TODO: Релазиовать маршруты
 #[derive(Debug, Clone)]
 pub struct Route {
     pub hops: Vec<LiquidityEdge>,
@@ -213,39 +214,104 @@ pub struct ProcessedPoolState {
 
 impl ProcessedPoolState {
     pub fn update(&mut self, pool_data: &PoolData, slot: u64) -> bool {
-        let updated = self.base.update(pool_data);
-        if updated {
+        let mut updated = false;
+        let pool_address = self.base.get_address();
+
+        // 1. Обновляем базовое состояние
+        if self.base.update(pool_data) {
             self.processed_slot = slot;
             self.last_update_time = unix_timestamp();
+            updated = true;
 
-            // Обновляем все цепочки, содержащие этот пул
-            let affected_chains: Vec<Vec<String>> = GLOBAL_DATA.chains_4.iter()
-                .chain(GLOBAL_DATA.chains_5.iter())
-                .filter(|chain_ref| {
-                    chain_ref.windows(2).any(|window| {
-                        let (from, to) = (&window[0], &window[1]);
-                        for dex in [DexType::Orca, DexType::Raydium, DexType::Meteora] {
-                            if let Some(pool_address) = GLOBAL_DATA.find_pool_address_by_symbols(
-                                dex, from, to
-                            ) {
-                                if pool_address == self.base.get_address() {
-                                    return true;
-                                }
+            // 2. Обновляем ребра в обоих графах
+            for graph in [&GLOBAL_DATA.processed_graph, &GLOBAL_DATA.finalized_graph] {
+                if let Some(mut g) = graph.get_mut("main") {
+                    if let Some(edge_idx) = g.edge_indices()
+                        .find(|&e| g[e].pool_address == pool_address) {
+                        
+                        let edge = &mut g[edge_idx];
+                        
+                        // Обновляем метрики в зависимости от типа DEX
+                        match &self.base {
+                            PoolStateBase::Orca(state) => {
+                                let price = calculators::calculate_orca_price(state.sqrt_price);
+                                let fee_rate = state.fee_rate as f64 / 10_000.0;
+                                let liquidity = state.liquidity as f64;
+                                let weight = calculate_orca_weight(
+                                    price,
+                                    fee_rate,
+                                    liquidity,
+                                    state.tick_spacing
+                                );
+
+                                edge.update_metrics(
+                                    price,
+                                    fee_rate,
+                                    liquidity,
+                                    weight,
+                                    state.is_active,
+                                    slot
+                                );
+
+                                debug!("Обновлены метрики для Orca пула {}: price={}, fee_rate={}, liquidity={}, weight={}", 
+                                    pool_address, price, fee_rate, liquidity, weight);
+                            },
+                            PoolStateBase::Raydium(state) => {
+                                let price = calculators::calculate_raydium_price(state.min_price, state.max_price);
+                                let fee_rate = calculators::calculate_raydium_fee(
+                                    state.fee_numerator,
+                                    state.fee_denominator
+                                );
+                                let liquidity = state.total_lp as f64;
+                                let weight = calculate_raydium_weight(
+                                    price,
+                                    fee_rate,
+                                    liquidity,
+                                    state.orders_num,
+                                    state.depth
+                                );
+
+                                edge.update_metrics(
+                                    price,
+                                    fee_rate,
+                                    liquidity,
+                                    weight,
+                                    state.status != 0 && state.pool_state != 0,
+                                    slot
+                                );
+
+                                debug!("Обновлены метрики для Raydium пула {}: price={}, fee_rate={}, liquidity={}, weight={}", 
+                                    pool_address, price, fee_rate, liquidity, weight);
+                            },
+                            PoolStateBase::Meteora(state) => {
+                                let price = calculators::calculate_meteora_price(state.sqrt_price);
+                                let fee_rate = state.fee_rate as f64 / 10_000.0;
+                                let liquidity = state.liquidity as f64;
+                                let weight = calculate_meteora_weight(
+                                    price,
+                                    fee_rate,
+                                    liquidity,
+                                    state.liquidity_multiplier
+                                );
+
+                                edge.update_metrics(
+                                    price,
+                                    fee_rate,
+                                    liquidity,
+                                    weight,
+                                    state.dynamic_liquidity_mode != 0 && state.liquidity_cap > 0,
+                                    slot
+                                );
+
+                                debug!("Обновлены метрики для Meteora пула {}: price={}, fee_rate={}, liquidity={}, weight={}", 
+                                    pool_address, price, fee_rate, liquidity, weight);
                             }
                         }
-                        false
-                    })
-                })
-                .map(|chain_ref| chain_ref.to_vec())
-                .collect();
-
-            // Обновляем каждую затронутую цепочку
-            for chain in affected_chains {
-                if let Some(new_amount) = GLOBAL_DATA.update_chain(&chain, self.base.get_address()) {
-                    debug!("Updated chain {:?}, new amount: {}", chain, new_amount);
+                    }
                 }
             }
         }
+
         updated
     }
 }
@@ -260,39 +326,103 @@ pub struct FinalizedPoolState {
 
 impl FinalizedPoolState {
     pub fn update(&mut self, pool_data: &PoolData, slot: u64) -> bool {
-        let updated = self.base.update(pool_data);
-        if updated {
+        let mut updated = false;
+        let pool_address = self.base.get_address();
+
+        if self.base.update(pool_data) {
             self.finalized_slot = slot;
             self.last_update_time = unix_timestamp();
+            updated = true;
 
-            // Обновляем все цепочки, содержащие этот пул
-            let affected_chains: Vec<Vec<String>> = GLOBAL_DATA.chains_4.iter()
-                .chain(GLOBAL_DATA.chains_5.iter())
-                .filter(|chain_ref| {
-                    chain_ref.windows(2).any(|window| {
-                        let (from, to) = (&window[0], &window[1]);
-                        for dex in [DexType::Orca, DexType::Raydium, DexType::Meteora] {
-                            if let Some(pool_address) = GLOBAL_DATA.find_pool_address_by_symbols(
-                                dex, from, to
-                            ) {
-                                if pool_address == self.base.get_address() {
-                                    return true;
-                                }
+            // Обновляем ребра в обоих графах
+            for graph in [&GLOBAL_DATA.processed_graph, &GLOBAL_DATA.finalized_graph] {
+                if let Some(mut g) = graph.get_mut("main") {
+                    if let Some(edge_idx) = g.edge_indices()
+                        .find(|&e| g[e].pool_address == pool_address) {
+                        
+                        let edge = &mut g[edge_idx];
+                        
+                        // Обновляем метрики в зависимости от типа DEX
+                        match &self.base {
+                            PoolStateBase::Orca(state) => {
+                                let price = calculators::calculate_orca_price(state.sqrt_price);
+                                let fee_rate = state.fee_rate as f64 / 10_000.0;
+                                let liquidity = state.liquidity as f64;
+                                let weight = calculate_orca_weight(
+                                    price,
+                                    fee_rate,
+                                    liquidity,
+                                    state.tick_spacing
+                                );
+
+                                edge.update_metrics(
+                                    price,
+                                    fee_rate,
+                                    liquidity,
+                                    weight,
+                                    state.is_active,
+                                    slot
+                                );
+
+                                debug!("Обновлены метрики для Orca пула {}: price={}, fee_rate={}, liquidity={}, weight={}", 
+                                    pool_address, price, fee_rate, liquidity, weight);
+                            },
+                            PoolStateBase::Raydium(state) => {
+                                let price = calculators::calculate_raydium_price(state.min_price, state.max_price);
+                                let fee_rate = calculators::calculate_raydium_fee(
+                                    state.fee_numerator,
+                                    state.fee_denominator
+                                );
+                                let liquidity = state.total_lp as f64;
+                                let weight = calculate_raydium_weight(
+                                    price,
+                                    fee_rate,
+                                    liquidity,
+                                    state.orders_num,
+                                    state.depth
+                                );
+
+                                edge.update_metrics(
+                                    price,
+                                    fee_rate,
+                                    liquidity,
+                                    weight,
+                                    state.status != 0 && state.pool_state != 0,
+                                    slot
+                                );
+
+                                debug!("Обновлены метрики для Raydium пула {}: price={}, fee_rate={}, liquidity={}, weight={}", 
+                                    pool_address, price, fee_rate, liquidity, weight);
+                            },
+                            PoolStateBase::Meteora(state) => {
+                                let price = calculators::calculate_meteora_price(state.sqrt_price);
+                                let fee_rate = state.fee_rate as f64 / 10_000.0;
+                                let liquidity = state.liquidity as f64;
+                                let weight = calculate_meteora_weight(
+                                    price,
+                                    fee_rate,
+                                    liquidity,
+                                    state.liquidity_multiplier
+                                );
+
+                                edge.update_metrics(
+                                    price,
+                                    fee_rate,
+                                    liquidity,
+                                    weight,
+                                    state.dynamic_liquidity_mode != 0 && state.liquidity_cap > 0,
+                                    slot
+                                );
+
+                                debug!("Обновлены метрики для Meteora пула {}: price={}, fee_rate={}, liquidity={}, weight={}", 
+                                    pool_address, price, fee_rate, liquidity, weight);
                             }
                         }
-                        false
-                    })
-                })
-                .map(|chain_ref| chain_ref.to_vec())
-                .collect();
-
-            // Обновляем каждую затронутую цепочку
-            for chain in affected_chains {
-                if let Some(new_amount) = GLOBAL_DATA.update_chain(&chain, self.base.get_address()) {
-                    debug!("Updated chain {:?}, new amount: {}", chain, new_amount);
+                    }
                 }
             }
         }
+
         updated
     }
 }
@@ -404,9 +534,26 @@ pub struct GlobalData {
     // Графы для processed и finalized состояний
     pub processed_graph: Arc<DashMap<String, Graph<String, PoolEdge>>>,
     pub finalized_graph: Arc<DashMap<String, Graph<String, PoolEdge>>>,
+
+    // Быстрый поиск цепочек по адресу пула
+    pub chain_references: Arc<DashMap<Pubkey, Vec<usize>>>,
     
-    // Метрики пулов
-    pub pool_metrics: Arc<DashMap<Pubkey, PoolMetrics>>,
+    // Кэш результатов для цепочек
+    pub chain_results: Arc<DashMap<Vec<String>, ChainResult>>,
+
+    // Индексированное хранилище цепочек
+    pub chain_storage_4: Arc<DashMap<usize, Vec<String>>>,
+    pub chain_storage_5: Arc<DashMap<usize, Vec<String>>>,
+}
+
+// Структура для хранения результатов по цепочке
+#[derive(Debug, Clone)]
+pub struct ChainResult {
+    pub total_amount: u64,
+    pub best_weights: Vec<f64>,
+    pub best_pools: Vec<Pubkey>,
+    pub last_update: u64,
+    pub pool_versions: HashMap<Pubkey, u64>,
 }
 
 // Глобальный экземпляр данных
@@ -427,7 +574,10 @@ lazy_static! {
         chains_5: Arc::new(DashSet::new()),
         processed_graph: Arc::new(DashMap::new()),
         finalized_graph: Arc::new(DashMap::new()),
-        pool_metrics: Arc::new(DashMap::new()),
+        chain_references: Arc::new(DashMap::new()),
+        chain_results: Arc::new(DashMap::new()),
+        chain_storage_4: Arc::new(DashMap::new()),
+        chain_storage_5: Arc::new(DashMap::new()),
     };
 }
 
@@ -699,109 +849,165 @@ impl GlobalData {
         None
     }
 
-    // Обновление цепочки с использованием пула, который изменился
-    pub fn update_chain(&self, chain: &[String], changed_pool: Pubkey) -> Option<u64> {
-        let mut total_amount = INITIAL_BALANCE;
-        let mut chain_updated = false;
-        
-        // Находим позицию изменившегося пула в цепочке
-        let change_position = chain.windows(2).position(|window| {
-            let (from, to) = (&window[0], &window[1]);
-            for dex in [DexType::Orca, DexType::Raydium, DexType::Meteora] {
-                if let Some(pool_addr) = self.find_pool_address_by_symbols(dex, from, to) {
-                    if pool_addr == changed_pool {
-                        return true;
+    // Обновление цепочек, которые используют пул
+    pub fn update_affected_chains(&self, pool_address: Pubkey) {
+        if let Some(chain_indices) = self.chain_references.get(&pool_address) {
+            let offset_4 = self.chain_storage_4.len();
+            
+            for &idx in chain_indices.iter() {
+                if idx < offset_4 {
+                    // Обновляем цепочки длины 4
+                    if let Some(chain) = self.chain_storage_4.get(&idx) {
+                        if let Some(result) = self.update_chain(chain.value(), pool_address) {
+                            self.chain_results.insert(chain.value().clone(), result.clone());
+                            debug!("Обновили цепочку длины 4 [{}] с результатом: {:?}", idx, result);
+                        }
+                    }
+                } else {
+                    // Обновляем цепочки длины 5
+                    let idx_in_5 = idx - offset_4;
+                    if let Some(chain) = self.chain_storage_5.get(&idx_in_5) {
+                        if let Some(result) = self.update_chain(chain.value(), pool_address) {
+                            self.chain_results.insert(chain.value().clone(), result.clone());
+                            debug!("Обновили цепочку длины 5 [{}] с результатом: {:?}", idx_in_5, result);
+                        }
                     }
                 }
             }
-            false
-        })?;
+        }
+    }
 
-        // Для каждой пары токенов в цепочке после позиции изменения
-        for window in chain[change_position..].windows(2) {
+    // TODO:
+    // Обновление цепочки с использованием пула, который изменился
+    #[allow(unused_variables)]
+    pub fn update_chain(&self, chain: &[String], pool_address: Pubkey) -> Option<ChainResult> {
+        // Проверяем кэш
+        // info!("Проверяем кэш для пула {}", pool_address);
+        if let Some(cached) = self.chain_results.get(chain) {
+            // Проверяем версии всех пулов в кэше
+            let mut cache_valid = true;
+            
+            for (&pool, &cached_slot) in &cached.pool_versions {
+                // Получаем текущую версию пула из processed_pool_states
+                let current_slot = self.processed_pool_states
+                    .iter()
+                    .find_map(|entry| {
+                        entry.value()
+                            .get(&pool)
+                            .map(|state| state.processed_slot)
+                    })
+                    .unwrap_or(0);
+                debug!("Найден текущий слот для пула {}", current_slot);
+
+                if current_slot != cached_slot {
+                    debug!("Кэш инвалидирован: пул {} обновился ({} -> {})", 
+                        pool, cached_slot, current_slot);
+                    cache_valid = false;
+                    break;
+                }
+            }
+
+            if cache_valid {
+                debug!("Используем валидный кэш для цепочки длины {}", chain.len());
+                return Some(cached.clone());
+            }
+        }
+
+        let mut total_amount = INITIAL_BALANCE;
+        let mut best_weights = Vec::with_capacity(chain.len() - 1);
+        let mut best_pools = Vec::with_capacity(chain.len() - 1);
+        let mut pool_versions = HashMap::new();
+        
+        // Используем уже обновленные веса из графа
+        for window in chain.windows(2) {
             let (token_a, token_b) = (&window[0], &window[1]);
             
             // Находим лучший пул среди всех DEX
             let mut best_edge = None;
+            let mut best_weight = 0.0;
+            let mut best_pool = None;
             
+            // Проверяем все DEX для этой пары
             for dex in [DexType::Orca, DexType::Raydium, DexType::Meteora] {
-                if let Some(pool_address) = self.find_pool_address_by_symbols(dex, token_a, token_b) {
-                    // Клонируем необходимые данные
-                    let metrics = self.pool_metrics.get(&pool_address)?.clone();
-                    let pool_state = self.processed_pool_states
-                        .get(&dex)?
-                        .get(&pool_address)?
-                        .clone();
-
-                    let mut edge = PoolEdge {
-                        pool_address,
-                        weight: 0.0,
-                        price: metrics.price,
-                        fee_rate: metrics.fee_rate,
-                        liquidity: metrics.liquidity,
-                        is_active: true,
-                        current_amount: total_amount,
-                        chain_position: Some(change_position),
-                    };
-                    debug!("[UPDATE CHAIN] Обновляем вес пула внутри update_chain для {:?}", dex);
-
-                    if edge.update_weight(&pool_state.base) && edge.weight > 0.0 {
-                        match best_edge {
-                            None => best_edge = Some(edge),
-                            Some(ref current_best) if edge.weight > current_best.weight => {
-                                best_edge = Some(edge)
-                            },
-                            _ => {}
+                if let Some(current_pool) = self.find_pool_address_by_symbols(dex, token_a, token_b) {
+                    if let Some(g) = self.processed_graph.get("main") {
+                        if let Some(edge_idx) = g.edge_indices()
+                            .find(|&e| g[e].pool_address == current_pool) 
+                        {
+                            // debug!("Найден пул {} в графе", current_pool);
+                            let edge = &g[edge_idx];
+                            if edge.is_active && edge.weight > best_weight {
+                                best_edge = Some(edge.clone());
+                                best_weight = edge.weight;
+                                best_pool = Some(current_pool);
+                                
+                                // Сохраняем версию пула
+                                if let Some(pool_state) = self.processed_pool_states
+                                    .iter()
+                                    .find_map(|entry| {
+                                        entry.value()
+                                            .get(&current_pool)
+                                            .map(|state| state.processed_slot)
+                                    })
+                                {
+                                    pool_versions.insert(current_pool, pool_state);
+                                    debug!("Сохранили версию пула в кэш");
+                                }
+                            }
                         }
-                        chain_updated = true;
                     }
                 }
             }
 
-            // Обновляем общую сумму используя лучший вес
-            if let Some(edge) = best_edge {
+            if let (Some(edge), Some(pool)) = (best_edge, best_pool) {
                 total_amount = (total_amount as f64 * edge.weight) as u64;
+                best_weights.push(edge.weight);
+                best_pools.push(pool);
+                debug!("Найден лучший пул {} для пары {} -> {}", pool, token_a, token_b);
+            } else {
+                return None;
+            }
+        }
+
+        let result = ChainResult {
+            total_amount,
+            best_weights,
+            best_pools,
+            last_update: unix_timestamp(),
+            pool_versions,
+        };
+
+        // Сохраняем в кэш
+        self.chain_results.insert(chain.to_vec(), result.clone());
+        // debug!("Сохранили цепочку длины {} в кэш", chain.len());
+        
+        Some(result)
+    }
+
+    // Функция проверки и валидация графов
+    pub fn validate_graphs(&self) -> bool {
+        for graph in [&self.processed_graph, &self.finalized_graph] {
+            if let Some(g) = graph.get("main") {
+                info!("Валидация графа: {} вершин, {} ребер", 
+                      g.node_count(), g.edge_count());
                 
-                // Обновляем ребро в графах
-                for graph in [&self.processed_graph, &self.finalized_graph] {
-                    if let Some(mut g) = graph.get_mut("main") {
-                        if let Some(edge_idx) = g.edge_indices()
-                            .find(|&e| g[e].pool_address == edge.pool_address) 
-                        {
-                            g[edge_idx] = edge.clone();
-                        }
+                // Проверяем все ребра
+                for edge in g.edge_indices() {
+                    let edge_ref = &g[edge];
+                    if !self.pool_exists(DexType::Orca, &edge_ref.pool_address) &&
+                       !self.pool_exists(DexType::Raydium, &edge_ref.pool_address) &&
+                       !self.pool_exists(DexType::Meteora, &edge_ref.pool_address) {
+                        error!("Найдено ребро с несуществующим пулом: {}", 
+                               edge_ref.pool_address);
+                        return false;
                     }
                 }
             } else {
-                return None; // Цепочка невалидна
+                error!("Граф 'main' не найден");
+                return false;
             }
         }
-
-        // Если цепочка была обновлена, обновляем кэш маршрутов
-        if chain_updated {
-            if let (Some(first), Some(last)) = (chain.first(), chain.last()) {
-                if let (Some(first_token), Some(last_token)) = (
-                    self.tokens.get(first),
-                    self.tokens.get(last)
-                ) {
-                    let route = Route {
-                        hops: vec![], // TODO: Заполнить хопы
-                        total_fee: 0, // TODO: Рассчитать общую комиссию
-                        estimated_price_impact: 0.0 // TODO: Рассчитать влияние на цену
-                    };
-                    self.route_cache.insert(
-                        (first_token.address, last_token.address),
-                        vec![route]
-                    );
-                }
-            }
-        }
-
-        if chain_updated && total_amount == 0 {
-            warn!("[CRITICAL] Цепочка {:?} обновлена, но итоговая сумма равна 0. Возможна проблема с весами или блокировками", chain);
-        }
-
-        Some(total_amount)
+        true
     }
 }
 
@@ -845,7 +1051,8 @@ impl PoolState for PoolStateBase {
 impl OrcaPoolStateBase {
     pub fn update(&mut self, new_state: &WhirlpoolData) -> bool {
         let mut updated = false;
-        
+        let mut needs_update = false;
+
         // Проверка активности пула
         let is_dead_address = "11111111111111111111111111111111";
         let new_is_active = ![
@@ -860,7 +1067,7 @@ impl OrcaPoolStateBase {
             info!("[ORCA STATE] Pool {} activity changed: {} -> {}", 
                   self.pool_address, self.is_active, new_is_active);
             self.is_active = new_is_active;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление ценовых параметров
@@ -869,7 +1076,7 @@ impl OrcaPoolStateBase {
             debug!("[ORCA STATE] Pool {} sqrt_price update: {} -> {}", 
                    self.pool_address, self.sqrt_price, new_sqrt_price);
             self.sqrt_price = new_sqrt_price;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление пороговой цены
@@ -878,7 +1085,7 @@ impl OrcaPoolStateBase {
             debug!("[ORCA STATE] Pool {} price_threshold update: {} -> {}", 
                    self.pool_address, self.price_threshold, new_price_threshold);
             self.price_threshold = new_price_threshold;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление ликвидности
@@ -887,7 +1094,7 @@ impl OrcaPoolStateBase {
             debug!("[ORCA STATE] Pool {} liquidity update: {} -> {}", 
                    self.pool_address, self.liquidity, new_liquidity);
             self.liquidity = new_liquidity;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление тика
@@ -896,7 +1103,7 @@ impl OrcaPoolStateBase {
             debug!("[ORCA STATE] Pool {} tick_index update: {} -> {}", 
                    self.pool_address, self.tick_current_index, new_tick_current_index);
             self.tick_current_index = new_tick_current_index;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление комиссий
@@ -905,7 +1112,7 @@ impl OrcaPoolStateBase {
             debug!("[ORCA STATE] Pool {} fee_rate update: {} -> {}", 
                    self.pool_address, self.fee_rate, new_fee_rate);
             self.fee_rate = new_fee_rate;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление протокольной комиссии
@@ -914,7 +1121,7 @@ impl OrcaPoolStateBase {
             debug!("[ORCA STATE] Pool {} protocol_fee_rate update: {} -> {}", 
                    self.pool_address, self.protocol_fee_rate, new_protocol_fee_rate);
             self.protocol_fee_rate = new_protocol_fee_rate;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление накопленных комиссий
@@ -923,7 +1130,7 @@ impl OrcaPoolStateBase {
             debug!("[ORCA STATE] Pool {} fee_growth_a update: {} -> {}", 
                    self.pool_address, self.fee_growth_global_a, new_fee_growth_global_a);
             self.fee_growth_global_a = new_fee_growth_global_a;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление накопленных комиссий для токена B
@@ -932,7 +1139,7 @@ impl OrcaPoolStateBase {
             debug!("[ORCA STATE] Pool {} fee_growth_b update: {} -> {}", 
                    self.pool_address, self.fee_growth_global_b, new_fee_growth_global_b);
             self.fee_growth_global_b = new_fee_growth_global_b;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление протокольных комиссий
@@ -941,7 +1148,7 @@ impl OrcaPoolStateBase {
             debug!("[ORCA STATE] Pool {} protocol_fee_owed_a update: {} -> {}", 
                    self.pool_address, self.protocol_fee_owed_a, new_protocol_fee_owed_a);
             self.protocol_fee_owed_a = new_protocol_fee_owed_a;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление протокольных комиссий для токена B
@@ -950,58 +1157,54 @@ impl OrcaPoolStateBase {
             debug!("[ORCA STATE] Pool {} protocol_fee_owed_b update: {} -> {}", 
                    self.pool_address, self.protocol_fee_owed_b, new_protocol_fee_owed_b);
             self.protocol_fee_owed_b = new_protocol_fee_owed_b;
+            needs_update = true;
+        }
+
+        if needs_update {
             updated = true;
         }
 
         if updated {
-            // Создаем новые метрики
-            let new_metrics = PoolMetrics {
-                price: calculators::calculate_orca_price(self.sqrt_price),
-                liquidity: self.liquidity as f64,
-                fee_rate: self.fee_rate as f64 / 10_000.0,
-            };
-            debug!("[ORCA STATE] Новые метрики для Orca пула {}: price={}, liquidity={}, fee_rate={}", self.pool_address, new_metrics.price, new_metrics.liquidity, new_metrics.fee_rate);
-            self.update_pool_edge(new_metrics);
-        }
-        
-        updated
-    }
-
-    fn update_pool_edge(&self, metrics: PoolMetrics) {
-        // Обновляем метрики в глобальном хранилище
-        if update_pool_metrics(self.pool_address, metrics.clone(), 
-            GLOBAL_DATA.pool_metrics.get(&self.pool_address).as_deref()) {
-            
             // Обновляем ребро в обоих графах
             for graph in [&GLOBAL_DATA.processed_graph, &GLOBAL_DATA.finalized_graph] {
                 if let Some(mut g) = graph.get_mut("main") {
                     if let Some(edge_idx) = g.edge_indices()
                         .find(|&e| g[e].pool_address == self.pool_address) {
-                        
+                                                
                         let edge = &mut g[edge_idx];
-                        edge.price = metrics.price;
-                        edge.fee_rate = metrics.fee_rate;
-                        edge.liquidity = metrics.liquidity;
-                        edge.is_active = true;
-                        
-                        debug!("Новые метрики: price={}, fee_rate={}, liquidity={}", metrics.price, metrics.fee_rate, metrics.liquidity);
-                        
-                        // Рассчитываем вес для Orca
-                        edge.weight = calculate_orca_weight(
-                            edge.price,
-                            edge.fee_rate,
-                            edge.liquidity,
-                            self.tick_spacing // используем tick_spacing вместо volume_24h
+                        let price = calculators::calculate_orca_price(self.sqrt_price);
+                        let fee_rate = self.fee_rate as f64 / 10_000.0;
+                        let liquidity = self.liquidity as f64;
+                        let weight = calculate_orca_weight(
+                            price,
+                            fee_rate,
+                            liquidity,
+                            self.tick_spacing
                         );
-                        debug!("Рассчитали вес для Orca пула {}: {}", self.pool_address, edge.weight);
+
+                        edge.update_metrics(
+                            price,
+                            fee_rate,
+                            liquidity,
+                            weight,
+                            self.is_active,
+                            GLOBAL_DATA.network_state
+                                .get("current")
+                                .map(|s| s.current_slot)
+                                .unwrap_or(0)
+                        );
+
+                        debug!("Обновлены метрики ребер для Orca пула {}: price={}, fee_rate={}, liquidity={}, weight={}", 
+                            self.pool_address, price, fee_rate, liquidity, weight);
                     }
                 }
             }
-            
-            // Сохраняем новые метрики
-            GLOBAL_DATA.pool_metrics.insert(self.pool_address, metrics);
-            debug!("Обновили метрики пула для Orca: {}", self.pool_address);
+            // Обновляем все цепочки, использующие этот пул
+            warn!("Обновляем все цепочки, использующие этот пул");
+            GLOBAL_DATA.update_affected_chains(self.pool_address);
         }
+        
+        updated
     }
 
     pub fn from_whirlpool(pool_address: Pubkey, data: &WhirlpoolData) -> Self {
@@ -1033,6 +1236,7 @@ impl OrcaPoolStateBase {
 impl RaydiumPoolStateBase {
     pub fn update(&mut self, new_state: &RaydiumData) -> bool {
         let mut updated = false;
+        let mut needs_update = false;
 
         // Проверка активности пула
         let is_dead_address = Pubkey::default().to_string();
@@ -1057,7 +1261,7 @@ impl RaydiumPoolStateBase {
             } else {
                 self.status = 0; // Устанавливаем статус в 0 для неактивного пула
             }
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление состояния пула
@@ -1066,7 +1270,7 @@ impl RaydiumPoolStateBase {
             debug!("[RAYDIUM STATE] Pool {} pool_state update: {} -> {}", 
                    self.pool_address, self.pool_state, new_pool_state);
             self.pool_state = new_pool_state;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление total_lp
@@ -1075,7 +1279,7 @@ impl RaydiumPoolStateBase {
             debug!("[RAYDIUM STATE] Pool {} total_lp update: {} -> {}", 
                    self.pool_address, self.total_lp, new_total_lp);
             self.total_lp = new_total_lp;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление параметров цены
@@ -1084,7 +1288,7 @@ impl RaydiumPoolStateBase {
             debug!("[RAYDIUM STATE] Pool {} min_price update: {} -> {}", 
                    self.pool_address, self.min_price, new_min_price);
             self.min_price = new_min_price;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление максимальной цены
@@ -1093,7 +1297,7 @@ impl RaydiumPoolStateBase {
             debug!("[RAYDIUM STATE] Pool {} max_price update: {} -> {}", 
                    self.pool_address, self.max_price, new_max_price);
             self.max_price = new_max_price;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление глубины ордеров
@@ -1104,7 +1308,7 @@ impl RaydiumPoolStateBase {
                 self.pool_address, new_orders_num, new_depth);
             self.orders_num = new_state.orders_num;
             self.depth = new_state.depth;
-            updated = true;
+            needs_update = true;
         }
 
         // Отслеживание необходимости вывода
@@ -1116,7 +1320,7 @@ impl RaydiumPoolStateBase {
                 self.pool_address, new_base_need_take, new_quote_need_take);
             self.base_need_take = new_base_need_take;
             self.quote_need_take = new_quote_need_take;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление комиссий
@@ -1129,7 +1333,7 @@ impl RaydiumPoolStateBase {
                    new_fee_numerator, new_fee_denominator);
             self.fee_numerator = new_fee_numerator;
             self.fee_denominator = new_fee_denominator;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление слотов
@@ -1138,30 +1342,14 @@ impl RaydiumPoolStateBase {
             debug!("[RAYDIUM STATE] Pool {} recent_slot update: {} -> {}", 
                    self.pool_address, self.recent_slot, new_recent_slot);
             self.recent_slot = new_recent_slot;
+            needs_update = true;
+        }
+
+        if needs_update {
             updated = true;
         }
 
         if updated {
-            // Создаем новые метрики
-            let new_metrics = PoolMetrics {
-                price: calculators::calculate_raydium_price(self.min_price, self.max_price),
-                liquidity: self.total_lp as f64,
-                fee_rate: calculators::calculate_raydium_fee(
-                    self.fee_numerator,
-                    self.fee_denominator
-                ),
-            };
-            debug!("[RAYDIUM STATE] Новые метрики для Raydium пула {}: price={}, liquidity={}, fee_rate={}", self.pool_address, new_metrics.price, new_metrics.liquidity, new_metrics.fee_rate);
-            self.update_pool_edge(new_metrics);
-        }
-
-        updated
-    }
-
-    fn update_pool_edge(&self, metrics: PoolMetrics) {
-        if update_pool_metrics(self.pool_address, metrics.clone(), 
-            GLOBAL_DATA.pool_metrics.get(&self.pool_address).as_deref()) {
-            
             // Обновляем ребро в обоих графах
             for graph in [&GLOBAL_DATA.processed_graph, &GLOBAL_DATA.finalized_graph] {
                 if let Some(mut g) = graph.get_mut("main") {
@@ -1169,31 +1357,42 @@ impl RaydiumPoolStateBase {
                         .find(|&e| g[e].pool_address == self.pool_address) {
                         
                         let edge = &mut g[edge_idx];
-                        edge.price = metrics.price;
-                        edge.fee_rate = metrics.fee_rate;
-                        edge.liquidity = metrics.liquidity;
-                        // Для Raydium проверяем статус и pool_state
-                        edge.is_active = self.status != 0 && self.pool_state != 0;
-
-                        debug!("Новые метрики для Raydium: price={}, fee_rate={}, liquidity={}", metrics.price, metrics.fee_rate, metrics.liquidity);         
-
-                        // Рассчитываем вес для Raydium
-                        edge.weight = calculate_raydium_weight(
-                            edge.price,
-                            edge.fee_rate,
-                            edge.liquidity,
+                        let price = calculators::calculate_raydium_price(self.min_price, self.max_price);
+                        let fee_rate = calculators::calculate_raydium_fee(
+                            self.fee_numerator,
+                            self.fee_denominator
+                        );
+                        let liquidity = self.total_lp as f64;
+                        let weight = calculate_raydium_weight(
+                            price,
+                            fee_rate,
+                            liquidity,
                             self.orders_num,
                             self.depth
                         );
-                        debug!("Рассчитали вес для Raydium: {}", edge.weight);
+
+                        edge.update_metrics(
+                            price,
+                            fee_rate,
+                            liquidity,
+                            weight,
+                            self.status != 0 && self.pool_state != 0,
+                            GLOBAL_DATA.network_state
+                                .get("current")
+                                .map(|s| s.current_slot)
+                                .unwrap_or(0)
+                        );
+
+                        debug!("Обновлены метрики ребер для Raydium пула {}: price={}, fee_rate={}, liquidity={}, weight={}", 
+                            self.pool_address, price, fee_rate, liquidity, weight);
                     }
                 }
             }
-            
-            // Сохраняем новые метрики
-            GLOBAL_DATA.pool_metrics.insert(self.pool_address, metrics);
-            debug!("Обновили метрики пула для Raydium: {}", self.pool_address);
+            // Обновляем все цепочки, использующие этот пул
+            GLOBAL_DATA.update_affected_chains(self.pool_address);
         }
+        
+        updated
     }
 
     pub fn from_raydium(pool_address: Pubkey, data: &RaydiumData) -> Self {
@@ -1235,6 +1434,7 @@ impl RaydiumPoolStateBase {
 impl MeteoraPoolStateBase {
     pub fn update(&mut self, new_state: &MeteoraData) -> bool {
         let mut updated = false;
+        let mut needs_update = false;
 
         // Проверка активности пула
         let new_is_active = new_state.authority != Pubkey::default() 
@@ -1255,7 +1455,7 @@ impl MeteoraPoolStateBase {
             } else {
                 self.dynamic_liquidity_mode = 0; // Устанавливаем режим в 0 для неактивного пула
             }
-            updated = true;
+            needs_update = true;
         }
 
         // Дополнительная проверка изменения authority
@@ -1263,7 +1463,7 @@ impl MeteoraPoolStateBase {
             debug!("[METEORA STATE] Pool {} authority changed: {} -> {}", 
                    self.pool_address, self.authority, new_state.authority);
             self.authority = new_state.authority;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление ликвидности
@@ -1272,7 +1472,7 @@ impl MeteoraPoolStateBase {
             debug!("[METEORA STATE] Pool {} liquidity update: {} -> {}", 
                    self.pool_address, self.liquidity, new_liquidity);
             self.liquidity = new_liquidity;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление sqrt_price
@@ -1281,7 +1481,7 @@ impl MeteoraPoolStateBase {
             debug!("[METEORA STATE] Pool {} sqrt_price update: {} -> {}", 
                    self.pool_address, self.sqrt_price, new_sqrt_price);
             self.sqrt_price = new_sqrt_price;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление текущего тика
@@ -1290,7 +1490,7 @@ impl MeteoraPoolStateBase {
             debug!("[METEORA STATE] Pool {} tick_index update: {} -> {}", 
                    self.pool_address, self.current_tick_index, new_current_tick_index);
             self.current_tick_index = new_current_tick_index;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление множителя ликвидности
@@ -1299,7 +1499,7 @@ impl MeteoraPoolStateBase {
             debug!("[METEORA STATE] Pool {} multiplier update: {} -> {}", 
                 self.pool_address, self.liquidity_multiplier, new_liquidity_multiplier);
             self.liquidity_multiplier = new_liquidity_multiplier;
-            updated = true;
+            needs_update = true;
         }
 
         // Проверка диапазона тиков
@@ -1311,7 +1511,7 @@ impl MeteoraPoolStateBase {
                 self.pool_address, new_min_tick_index, new_max_tick_index);
             self.max_tick_index = new_max_tick_index;
             self.min_tick_index = new_min_tick_index;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление комиссий
@@ -1320,7 +1520,7 @@ impl MeteoraPoolStateBase {
             debug!("[METEORA STATE] Pool {} fee_rate update: {} -> {}", 
                    self.pool_address, self.fee_rate, new_fee_rate);
             self.fee_rate = new_fee_rate;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление протокольных комиссий
@@ -1329,7 +1529,7 @@ impl MeteoraPoolStateBase {
             debug!("[METEORA STATE] Pool {} protocol_fee_rate update: {} -> {}", 
                    self.pool_address, self.protocol_fee_rate, new_protocol_fee_rate);
             self.protocol_fee_rate = new_protocol_fee_rate;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление глобальных комиссий
@@ -1338,7 +1538,7 @@ impl MeteoraPoolStateBase {
             debug!("[METEORA STATE] Pool {} fee_growth_a update: {} -> {}", 
                    self.pool_address, self.fee_growth_global_a, new_fee_growth_global_a);
             self.fee_growth_global_a = new_fee_growth_global_a;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление протокольных комиссий
@@ -1347,7 +1547,7 @@ impl MeteoraPoolStateBase {
             debug!("[METEORA STATE] Pool {} fee_growth_b update: {} -> {}", 
                    self.pool_address, self.fee_growth_global_b, new_fee_growth_global_b);
             self.fee_growth_global_b = new_fee_growth_global_b;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление параметров динамической ликвидности
@@ -1356,7 +1556,7 @@ impl MeteoraPoolStateBase {
             debug!("[METEORA STATE] Pool {} dynamic_mode update: {} -> {}", 
                    self.pool_address, self.dynamic_liquidity_mode, new_dynamic_liquidity_mode);
             self.dynamic_liquidity_mode = new_dynamic_liquidity_mode;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление метрик
@@ -1365,7 +1565,7 @@ impl MeteoraPoolStateBase {
             debug!("[METEORA STATE] Pool {} volume_24h update: {} -> {}", 
                    self.pool_address, self.volume_24h, new_volume_24h);
             self.volume_24h = new_volume_24h;
-            updated = true;
+            needs_update = true;
         }
 
         // Обновление комиссий за 24 часа
@@ -1374,59 +1574,52 @@ impl MeteoraPoolStateBase {
             debug!("[METEORA STATE] Pool {} fees_24h update: {} -> {}", 
                    self.pool_address, self.fees_24h, new_fees_24h);
             self.fees_24h = new_fees_24h;
+            needs_update = true;
+        }
+
+        if needs_update {
             updated = true;
         }
 
         if updated {
-            let new_metrics = PoolMetrics {
-                price: calculators::calculate_meteora_price(self.sqrt_price),
-                liquidity: self.liquidity as f64,
-                fee_rate: self.fee_rate as f64 / 10_000.0,
-            };
-            debug!("[METEORA STATE] Новые метрики для Meteora пула {}: price={}, liquidity={}, fee_rate={}", self.pool_address, new_metrics.price, new_metrics.liquidity, new_metrics.fee_rate);
-            self.update_pool_edge(new_metrics);
-        }
-
-        updated
-    }
-
-    fn update_pool_edge(&self, metrics: PoolMetrics) {
-        // Обновляем метрики в глобальном хранилище
-        if update_pool_metrics(self.pool_address, metrics.clone(), 
-            GLOBAL_DATA.pool_metrics.get(&self.pool_address).as_deref()) {
-            
-            // Обновляем ребро в обоих графах
             for graph in [&GLOBAL_DATA.processed_graph, &GLOBAL_DATA.finalized_graph] {
                 if let Some(mut g) = graph.get_mut("main") {
                     if let Some(edge_idx) = g.edge_indices()
                         .find(|&e| g[e].pool_address == self.pool_address) {
                         
                         let edge = &mut g[edge_idx];
-                        edge.price = metrics.price;
-                        edge.fee_rate = metrics.fee_rate;
-                        edge.liquidity = metrics.liquidity;
-                        // Для Meteora проверяем режим ликвидности
-                        edge.is_active = self.dynamic_liquidity_mode != 0 
-                            && self.liquidity_cap > 0;
-
-                        debug!("Новые метрики для Meteora: price={}, fee_rate={}, liquidity={}", metrics.price, metrics.fee_rate, metrics.liquidity);
-                        
-                        // Рассчитываем вес для Meteora
-                        edge.weight = calculate_meteora_weight(
-                            edge.price,
-                            edge.fee_rate,
-                            edge.liquidity,
+                        let price = calculators::calculate_meteora_price(self.sqrt_price);
+                        let fee_rate = self.fee_rate as f64 / 10_000.0;
+                        let liquidity = self.liquidity as f64;
+                        let weight = calculate_meteora_weight(
+                            price,
+                            fee_rate,
+                            liquidity,
                             self.liquidity_multiplier
                         );
-                        debug!("Рассчитали вес для Meteora: {}", edge.weight);
+
+                        edge.update_metrics(
+                            price,
+                            fee_rate,
+                            liquidity,
+                            weight,
+                            self.dynamic_liquidity_mode != 0 && self.liquidity_cap > 0,
+                            GLOBAL_DATA.network_state
+                                .get("current")
+                                .map(|s| s.current_slot)
+                                .unwrap_or(0)
+                        );
+
+                        debug!("Обновлены метрики ребер для Meteora пула {}: price={}, fee_rate={}, liquidity={}, weight={}", 
+                            self.pool_address, price, fee_rate, liquidity, weight);
                     }
                 }
             }
-            
-            // Сохраняем новые метрики
-            GLOBAL_DATA.pool_metrics.insert(self.pool_address, metrics);
-            debug!("Обновили метрики пула для Meteora: {}", self.pool_address);
+            // Обновляем все цепочки, использующие этот пул
+            GLOBAL_DATA.update_affected_chains(self.pool_address);
         }
+        
+        updated
     }
 
     pub fn from_meteora(pool_address: Pubkey, data: &MeteoraData) -> Self {

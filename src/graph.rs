@@ -1,13 +1,13 @@
 // src/graph.rs
 
+#[allow(unused_imports)]
 use log::{info, error, debug, warn};
 use hashbrown::{HashSet, HashMap};
+use petgraph::Graph;
 use solana_program::pubkey::Pubkey;
 
 use crate::data::GLOBAL_DATA;
 use crate::websocket::ws_data::DexType;
-use crate::data::PoolStateBase;
-use crate::math::weight_calculators::{calculate_orca_weight, calculate_raydium_weight, calculate_meteora_weight};
 
 const MIN_LEN: usize = crate::config::MIN_CHAIN_LENGTH; 
 const MAX_LEN: usize = crate::config::MAX_CHAIN_LENGTH;
@@ -19,48 +19,47 @@ pub struct PoolEdge {
     pub weight: f64,
     // Все метрики, влияющие на вес (цена, ликвидность, комиссия и т.д.)
     pub price: f64,
-    pub fee_rate: f64, 
+    pub fee_rate: f64,
     pub liquidity: f64,
     pub is_active: bool,
-    pub current_amount: u64, // Добавляем текущий баланс для цепочки
-    pub chain_position: Option<usize>, // Позиция в цепочке
+    pub current_amount: u64,
+    pub chain_position: Option<usize>,
+    pub last_update_slot: u64,
+    pub last_update_time: u64, // Добавляем для отслеживания времени
 }
 
-// Добавляем имплементацию для работы с весами
 impl PoolEdge {
-    pub fn update_weight(&mut self, pool_state: &PoolStateBase) -> bool {
-        let old_weight = self.weight;
-        
-        self.weight = match pool_state {
-            PoolStateBase::Orca(state) if state.is_active => {
-                calculate_orca_weight(
-                    self.price,
-                    self.fee_rate,
-                    self.liquidity,
-                    state.tick_spacing
-                )
-            },
-            PoolStateBase::Raydium(state) if state.status != 0 => {
-                calculate_raydium_weight(
-                    self.price,
-                    self.fee_rate,
-                    self.liquidity,
-                    state.orders_num,
-                    state.depth
-                )
-            },
-            PoolStateBase::Meteora(state) if state.dynamic_liquidity_mode != 0 => {
-                calculate_meteora_weight(
-                    self.price,
-                    self.fee_rate,
-                    self.liquidity,
-                    state.liquidity_multiplier
-                )
-            },
-            _ => 0.0
-        };
+    #[allow(dead_code)]
+    pub fn new(pool_address: Pubkey) -> Self {
+        Self {
+            pool_address,
+            price: 0.0,
+            fee_rate: 0.0,
+            liquidity: 0.0,
+            weight: 0.0,
+            is_active: true,
+            current_amount: 0,
+            chain_position: None,
+            last_update_slot: 0,
+            last_update_time: crate::data::unix_timestamp(),
+        }
+    }
 
-        self.weight != old_weight
+    pub fn update_metrics(&mut self, 
+        price: f64, 
+        fee_rate: f64, 
+        liquidity: f64,
+        weight: f64,
+        is_active: bool,
+        slot: u64
+    ) {
+        self.price = price;
+        self.fee_rate = fee_rate;
+        self.liquidity = liquidity;
+        self.weight = weight;
+        self.is_active = is_active;
+        self.last_update_slot = slot;
+        self.last_update_time = crate::data::unix_timestamp();
     }
 }
 
@@ -92,7 +91,13 @@ impl ValidPairs {
 
 // Основная функция для построения и поиска цепочек
 pub fn build_and_find_chains() {
-    // Валидируем токены перед построением цепочек
+    info!("Начинаем инициализацию графов");
+
+    // Явно создаем графы
+    GLOBAL_DATA.processed_graph.insert("main".to_string(), Graph::new());
+    GLOBAL_DATA.finalized_graph.insert("main".to_string(), Graph::new());
+
+    // Валидируем токены и строим цепочки
     let initial_tokens = crate::config::INITIAL_TOKENS;
     let valid_tokens = validate_tokens_across_dex(&initial_tokens);
     
@@ -306,22 +311,58 @@ pub fn build_and_find_chains() {
 
     info!("Сохранение найденных цепочек в глобальную структуру данных");
     
-    // Сохраняем цепочки длины 4
-    for chain in chains_by_4.iter() {
+    // Сохраняем цепочки длины 4 в оба хранилища
+    for (i, chain) in chains_by_4.iter().enumerate() {
+        GLOBAL_DATA.chain_storage_4.insert(i, chain.clone());
         GLOBAL_DATA.chains_4.insert(chain.clone());
-        info!("Сохранили цепочку длины 4: {:?}", chain);
+        // debug!("Сохранили цепочку длины 4 [{}]: {:?}", i, chain);
     }
     
-    // Сохраняем цепочки длины 5
-    for chain in chains_by_5.iter() {
+    let offset_4 = chains_by_4.len();
+    
+    // Сохраняем цепочки длины 5 в оба хранилища
+    for (i, chain) in chains_by_5.iter().enumerate() {
+        GLOBAL_DATA.chain_storage_5.insert(i, chain.clone());
         GLOBAL_DATA.chains_5.insert(chain.clone());
-        info!("Сохранили цепочку длины 5: {:?}", chain);
+        // debug!("Сохранили цепочку длины 5 [{}]: {:?}", i, chain);
     }
 
-    info!("После фильтрации - всего уникальных цепочек длины 4: {}", GLOBAL_DATA.chains_4.len());
-    info!("После фильтрации - всего уникальных цепочек длины 5: {}", GLOBAL_DATA.chains_5.len());
-    
-    info!("Построение графа и поиск цепочек завершено");
+    info!("Построение графа и поиск цепочек завершено. После фильтрации - всего уникальных цепочек длины 4: {} и длины 5: {}", GLOBAL_DATA.chains_4.len(), GLOBAL_DATA.chains_5.len());    
+
+    // Индексируем цепочки для быстрого поиска
+    for (chain_idx, chain) in chains_by_4.iter().enumerate() {
+        for window in chain.windows(2) {
+            let token_a = &window[0];
+            let token_b = &window[1];
+            
+            // Проверяем все DEX для этой пары
+            for dex in [DexType::Orca, DexType::Raydium, DexType::Meteora] {
+                if let Some(pool_address) = GLOBAL_DATA.find_pool_address_by_symbols(dex, token_a, token_b) {
+                    GLOBAL_DATA.chain_references
+                        .entry(pool_address)
+                        .or_insert_with(Vec::new)
+                        .push(chain_idx); // Прямой индекс для цепочек длины 4
+                }
+            }
+        }
+    }
+
+    // Индексируем цепочки длины 5 со смещением
+    for (chain_idx, chain) in chains_by_5.iter().enumerate() {
+        for window in chain.windows(2) {
+            let token_a = &window[0];
+            let token_b = &window[1];
+            
+            for dex in [DexType::Orca, DexType::Raydium, DexType::Meteora] {
+                if let Some(pool_address) = GLOBAL_DATA.find_pool_address_by_symbols(dex, token_a, token_b) {
+                    GLOBAL_DATA.chain_references
+                        .entry(pool_address)
+                        .or_insert_with(Vec::new)
+                        .push(offset_4 + chain_idx); // Индекс со смещением для цепочек длины 5
+                }
+            }
+        }
+    }
 
     // После создания цепочек инициализируем графы
     for graph in [&GLOBAL_DATA.processed_graph, &GLOBAL_DATA.finalized_graph] {
@@ -338,7 +379,7 @@ pub fn build_and_find_chains() {
                             // Добавляем вершины если их еще нет
                             let idx1 = g.add_node(token1.clone());
                             let idx2 = g.add_node(token2.clone());
-                            warn!("Добавили вершины: {} -> {} из graph.rs файл", token1, token2);
+                            // debug!("Добавили вершины: {} -> {} из graph.rs файл", token1, token2);
                             
                             // Создаем базовое ребро
                             g.add_edge(idx1, idx2, PoolEdge {
@@ -350,6 +391,8 @@ pub fn build_and_find_chains() {
                                 is_active: true,
                                 current_amount: 0,
                                 chain_position: None,
+                                last_update_slot: 0,
+                                last_update_time: 0,
                             });
                         }
                     }
@@ -357,6 +400,8 @@ pub fn build_and_find_chains() {
             }
         }
     }
+    GLOBAL_DATA.validate_graphs();
+    info!("Инициализация графов завершена");
 }
 
 // Добавим небольшую функцию для удаления дубликатов

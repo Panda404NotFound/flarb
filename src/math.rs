@@ -1,14 +1,4 @@
 // src/math.rs
-use solana_program::pubkey::Pubkey;
-use log::debug;
-
-// Структура для хранения метрик пула
-#[derive(Debug, Clone)]
-pub struct PoolMetrics {
-    pub price: f64,
-    pub liquidity: f64,
-    pub fee_rate: f64,
-}
 
 // Специфичные калькуляторы для каждого DEX
 pub mod calculators {
@@ -33,43 +23,6 @@ pub mod calculators {
             numerator as f64 / denominator as f64
         }
     }
-}
-
-// Функция для обновления метрик пула
-pub fn update_pool_metrics(
-    pool_address: Pubkey,
-    new_metrics: PoolMetrics,
-    old_metrics: Option<&PoolMetrics>,
-) -> bool {
-    let mut updated = false;
-
-    if let Some(old) = old_metrics {
-        // Проверяем существенные изменения в метриках
-        if (new_metrics.price - old.price).abs() / old.price > 0.001 {
-            debug!("Pool {} price changed by {:.2}%", 
-                   pool_address, 
-                   (new_metrics.price - old.price) * 100.0 / old.price);
-            updated = true;
-        }
-
-        if (new_metrics.liquidity - old.liquidity).abs() / old.liquidity > 0.01 {
-            debug!("Pool {} liquidity changed by {:.2}%",
-                   pool_address,
-                   (new_metrics.liquidity - old.liquidity) * 100.0 / old.liquidity);
-            updated = true;
-        }
-
-        if (new_metrics.fee_rate - old.fee_rate).abs() > f64::EPSILON {
-            debug!("Pool {} fee rate changed: {} -> {}", 
-                   pool_address, old.fee_rate, new_metrics.fee_rate);
-            updated = true;
-        }
-    } else {
-        // Если это новые метрики, считаем что обновление произошло
-        updated = true;
-    }
-
-    updated
 }
 
 // Расчет весов для пулов
