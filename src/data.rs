@@ -501,6 +501,22 @@ impl PoolLookupTable {
     }
 }
 
+// Добавляем новую структуру HopData
+#[derive(Debug, Clone)]
+pub struct HopData {
+    pub from_token: String,
+    pub to_token: String,
+    pub pools: Vec<(Pubkey, f64)>,
+    pub best_pool: Option<(Pubkey, f64)>,
+}
+
+// Обновляем структуру ChainResult
+#[derive(Debug, Clone)]
+pub struct ChainResult {
+    pub last_update: u64,
+    pub hops: Vec<HopData>,
+}
+
 // Глобальная структура данных
 #[allow(dead_code)]
 #[derive(Debug, Default)]
@@ -544,16 +560,10 @@ pub struct GlobalData {
     // Индексированное хранилище цепочек
     pub chain_storage_4: Arc<DashMap<usize, Vec<String>>>,
     pub chain_storage_5: Arc<DashMap<usize, Vec<String>>>,
-}
 
-// Структура для хранения результатов по цепочке
-#[derive(Debug, Clone)]
-pub struct ChainResult {
-    pub total_amount: u64,
-    pub best_weights: Vec<f64>,
-    pub best_pools: Vec<Pubkey>,
-    pub last_update: u64,
-    pub pool_versions: HashMap<Pubkey, u64>,
+    // Добавляем отдельные хранилища для processed и finalized результатов
+    pub processed_chain_results: Arc<DashMap<Vec<String>, ChainResult>>,
+    pub finalized_chain_results: Arc<DashMap<Vec<String>, ChainResult>>,
 }
 
 // Глобальный экземпляр данных
@@ -578,6 +588,8 @@ lazy_static! {
         chain_results: Arc::new(DashMap::new()),
         chain_storage_4: Arc::new(DashMap::new()),
         chain_storage_5: Arc::new(DashMap::new()),
+        processed_chain_results: Arc::new(DashMap::new()),
+        finalized_chain_results: Arc::new(DashMap::new()),
     };
 }
 
@@ -858,19 +870,19 @@ impl GlobalData {
                 if idx < offset_4 {
                     // Обновляем цепочки длины 4
                     if let Some(chain) = self.chain_storage_4.get(&idx) {
-                        if let Some(result) = self.update_chain(chain.value(), pool_address) {
-                            self.chain_results.insert(chain.value().clone(), result.clone());
-                            debug!("Обновили цепочку длины 4 [{}] с результатом: {:?}", idx, result);
-                        }
+                        // Обновляем processed и finalized варианты
+                        self.update_chain(chain.value(), pool_address, false);
+                        self.update_chain(chain.value(), pool_address, true);
+                        debug!("Обновили цепочку длины 4 [{}]", idx);
                     }
                 } else {
                     // Обновляем цепочки длины 5
                     let idx_in_5 = idx - offset_4;
                     if let Some(chain) = self.chain_storage_5.get(&idx_in_5) {
-                        if let Some(result) = self.update_chain(chain.value(), pool_address) {
-                            self.chain_results.insert(chain.value().clone(), result.clone());
-                            debug!("Обновили цепочку длины 5 [{}] с результатом: {:?}", idx_in_5, result);
-                        }
+                        // Обновляем processed и finalized варианты
+                        self.update_chain(chain.value(), pool_address, false);
+                        self.update_chain(chain.value(), pool_address, true);
+                        debug!("Обновили цепочку длины 5 [{}]", idx_in_5);
                     }
                 }
             }
@@ -880,107 +892,89 @@ impl GlobalData {
     // TODO:
     // Обновление цепочки с использованием пула, который изменился
     #[allow(unused_variables)]
-    pub fn update_chain(&self, chain: &[String], pool_address: Pubkey) -> Option<ChainResult> {
-        // Проверяем кэш
-        // info!("Проверяем кэш для пула {}", pool_address);
-        if let Some(cached) = self.chain_results.get(chain) {
-            // Проверяем версии всех пулов в кэше
-            let mut cache_valid = true;
-            
-            for (&pool, &cached_slot) in &cached.pool_versions {
-                // Получаем текущую версию пула из processed_pool_states
-                let current_slot = self.processed_pool_states
-                    .iter()
-                    .find_map(|entry| {
-                        entry.value()
-                            .get(&pool)
-                            .map(|state| state.processed_slot)
-                    })
-                    .unwrap_or(0);
-                debug!("Найден текущий слот для пула {}", current_slot);
+    pub fn update_chain(
+        &self,
+        chain: &[String],
+        pool_address: Pubkey,
+        is_finalized: bool
+    ) -> Option<ChainResult> {
+        debug!(
+            "Updating chain {:?}, trigger pool: {}, finalized={}",
+            chain, pool_address, is_finalized
+        );
 
-                if current_slot != cached_slot {
-                    debug!("Кэш инвалидирован: пул {} обновился ({} -> {})", 
-                        pool, cached_slot, current_slot);
-                    cache_valid = false;
-                    break;
-                }
+        // Выбираем нужный граф
+        let graph_map = if is_finalized {
+            &self.finalized_graph
+        } else {
+            &self.processed_graph
+        };
+
+        let graph = match graph_map.get("main") {
+            Some(g) => g,
+            None => {
+                warn!("Main graph not found (finalized={})", is_finalized);
+                return None;
             }
+        };
 
-            if cache_valid {
-                debug!("Используем валидный кэш для цепочки длины {}", chain.len());
-                return Some(cached.clone());
-            }
-        }
+        let mut hops_data = Vec::with_capacity(chain.len() - 1);
 
-        let mut total_amount = INITIAL_BALANCE;
-        let mut best_weights = Vec::with_capacity(chain.len() - 1);
-        let mut best_pools = Vec::with_capacity(chain.len() - 1);
-        let mut pool_versions = HashMap::new();
-        
-        // Используем уже обновленные веса из графа
+        // Проходим по всем парам токенов в цепочке
         for window in chain.windows(2) {
-            let (token_a, token_b) = (&window[0], &window[1]);
-            
-            // Находим лучший пул среди всех DEX
-            let mut best_edge = None;
-            let mut best_weight = 0.0;
-            let mut best_pool = None;
-            
-            // Проверяем все DEX для этой пары
+            let from_token = &window[0];
+            let to_token = &window[1];
+
+            let mut hop = HopData {
+                from_token: from_token.clone(),
+                to_token: to_token.clone(),
+                pools: Vec::new(),
+                best_pool: None,
+            };
+
+            // Проверяем все DEX для данной пары токенов
             for dex in [DexType::Orca, DexType::Raydium, DexType::Meteora] {
-                if let Some(current_pool) = self.find_pool_address_by_symbols(dex, token_a, token_b) {
-                    if let Some(g) = self.processed_graph.get("main") {
-                        if let Some(edge_idx) = g.edge_indices()
-                            .find(|&e| g[e].pool_address == current_pool) 
-                        {
-                            // debug!("Найден пул {} в графе", current_pool);
-                            let edge = &g[edge_idx];
-                            if edge.is_active && edge.weight > best_weight {
-                                best_edge = Some(edge.clone());
-                                best_weight = edge.weight;
-                                best_pool = Some(current_pool);
-                                
-                                // Сохраняем версию пула
-                                if let Some(pool_state) = self.processed_pool_states
-                                    .iter()
-                                    .find_map(|entry| {
-                                        entry.value()
-                                            .get(&current_pool)
-                                            .map(|state| state.processed_slot)
-                                    })
-                                {
-                                    pool_versions.insert(current_pool, pool_state);
-                                    debug!("Сохранили версию пула в кэш");
+                if let Some(pool_pubkey) = self.find_pool_address_by_symbols(dex, from_token, to_token) {
+                    if let Some(edge_idx) = graph.edge_indices()
+                        .find(|&e| graph[e].pool_address == pool_pubkey)
+                    {
+                        let edge = &graph[edge_idx];
+                        if edge.is_active {
+                            hop.pools.push((pool_pubkey, edge.weight));
+                            
+                            // Обновляем best_pool если нужно
+                            if let Some((_, best_weight)) = hop.best_pool {
+                                if edge.weight > best_weight {
+                                    hop.best_pool = Some((pool_pubkey, edge.weight));
                                 }
+                            } else {
+                                hop.best_pool = Some((pool_pubkey, edge.weight));
                             }
                         }
                     }
                 }
             }
 
-            if let (Some(edge), Some(pool)) = (best_edge, best_pool) {
-                total_amount = (total_amount as f64 * edge.weight) as u64;
-                best_weights.push(edge.weight);
-                best_pools.push(pool);
-                debug!("Найден лучший пул {} для пары {} -> {}", pool, token_a, token_b);
-            } else {
+            if hop.pools.is_empty() {
+                warn!("No active pools found for hop {}->{}", from_token, to_token);
                 return None;
             }
+
+            hops_data.push(hop);
         }
 
         let result = ChainResult {
-            total_amount,
-            best_weights,
-            best_pools,
             last_update: unix_timestamp(),
-            pool_versions,
+            hops: hops_data,
         };
 
-        // Сохраняем в кэш
-        self.chain_results.insert(chain.to_vec(), result.clone());
-        // debug!("Сохранили цепочку длины {} в кэш", chain.len());
-        
+        // Сохраняем результат в соответствующее хранилище
+        if is_finalized {
+            self.finalized_chain_results.insert(chain.to_vec(), result.clone());
+        } else {
+            self.processed_chain_results.insert(chain.to_vec(), result.clone());
+        }
+
         Some(result)
     }
 
