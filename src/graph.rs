@@ -13,6 +13,7 @@ const MIN_LEN: usize = crate::config::MIN_CHAIN_LENGTH;
 const MAX_LEN: usize = crate::config::MAX_CHAIN_LENGTH;
 
 // Структура для хранения информации о пуле и его весе
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct PoolEdge {
     pub pool_address: Pubkey,

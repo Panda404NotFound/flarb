@@ -15,9 +15,9 @@ use hashbrown::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use petgraph::Graph;
 use crate::graph::PoolEdge;
-use crate::config::INITIAL_BALANCE;
 use crate::math::calculators;
 use crate::math::weight_calculators::{calculate_orca_weight, calculate_raydium_weight, calculate_meteora_weight};
+use crate::router::RouterEngine; 
 
 // Структура для хранения информации о токене
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, Eq, PartialEq)]
@@ -49,15 +49,6 @@ pub struct LiquidityEdge {
     pub token_out: TokenInfo,
     pub liquidity: u64,
     pub fee_rate: u64,
-}
-
-// Структура для хранения информации о маршруте
-// TODO: Релазиовать маршруты
-#[derive(Debug, Clone)]
-pub struct Route {
-    pub hops: Vec<LiquidityEdge>,
-    pub total_fee: u64,
-    pub estimated_price_impact: f64,
 }
 
 // Базовая структура состояния пула для Orca
@@ -501,22 +492,6 @@ impl PoolLookupTable {
     }
 }
 
-// Добавляем новую структуру HopData
-#[derive(Debug, Clone)]
-pub struct HopData {
-    pub from_token: String,
-    pub to_token: String,
-    pub pools: Vec<(Pubkey, f64)>,
-    pub best_pool: Option<(Pubkey, f64)>,
-}
-
-// Обновляем структуру ChainResult
-#[derive(Debug, Clone)]
-pub struct ChainResult {
-    pub last_update: u64,
-    pub hops: Vec<HopData>,
-}
-
 // Глобальная структура данных
 #[allow(dead_code)]
 #[derive(Debug, Default)]
@@ -538,8 +513,7 @@ pub struct GlobalData {
     
     // Общие данные для маршрутизации
     pub liquidity_edges: Arc<DashMap<Pubkey, Vec<LiquidityEdge>>>,
-    // Кэш популярных маршрутов
-    pub route_cache: Arc<DashMap<(Pubkey, Pubkey), Vec<Route>>>,
+
     // Структура для хранения быстрого доступа к пулам
     pub pool_lookup: Arc<DashMap<DexType, PoolLookupTable>>,
 
@@ -553,17 +527,10 @@ pub struct GlobalData {
 
     // Быстрый поиск цепочек по адресу пула
     pub chain_references: Arc<DashMap<Pubkey, Vec<usize>>>,
-    
-    // Кэш результатов для цепочек
-    pub chain_results: Arc<DashMap<Vec<String>, ChainResult>>,
 
     // Индексированное хранилище цепочек
     pub chain_storage_4: Arc<DashMap<usize, Vec<String>>>,
     pub chain_storage_5: Arc<DashMap<usize, Vec<String>>>,
-
-    // Добавляем отдельные хранилища для processed и finalized результатов
-    pub processed_chain_results: Arc<DashMap<Vec<String>, ChainResult>>,
-    pub finalized_chain_results: Arc<DashMap<Vec<String>, ChainResult>>,
 }
 
 // Глобальный экземпляр данных
@@ -577,7 +544,6 @@ lazy_static! {
         finalized_pool_states: Arc::new(DashMap::new()),
         network_states: Arc::new(DashMap::new()),
         liquidity_edges: Arc::new(DashMap::new()),
-        route_cache: Arc::new(DashMap::new()),
         network_state: Arc::new(DashMap::new()),
         pool_lookup: Arc::new(DashMap::new()),
         chains_4: Arc::new(DashSet::new()),
@@ -585,11 +551,8 @@ lazy_static! {
         processed_graph: Arc::new(DashMap::new()),
         finalized_graph: Arc::new(DashMap::new()),
         chain_references: Arc::new(DashMap::new()),
-        chain_results: Arc::new(DashMap::new()),
         chain_storage_4: Arc::new(DashMap::new()),
         chain_storage_5: Arc::new(DashMap::new()),
-        processed_chain_results: Arc::new(DashMap::new()),
-        finalized_chain_results: Arc::new(DashMap::new()),
     };
 }
 
@@ -724,20 +687,6 @@ impl GlobalData {
         }
     }
 
-    #[allow(dead_code)]
-    // Поиск оптимального маршрута
-    // TODO: Реализовать логику для поиска оптимального маршрута
-    pub fn find_best_route(
-        &self,
-        token_in: Pubkey,
-        token_out: Pubkey,
-        amount: u64
-    ) -> Option<Route> {
-        debug!("Поиск оптимального маршрута {} -> {} для {}", 
-               token_in, token_out, amount);
-        None // TODO: имплементировать алгоритм поиска
-    }
-
     // Обновление состояния сети
     pub fn update_network_state(&self, slot_info: SlotInfo) {
         // Проверяем задержку обновлений
@@ -859,123 +808,6 @@ impl GlobalData {
             }
         }
         None
-    }
-
-    // Обновление цепочек, которые используют пул
-    pub fn update_affected_chains(&self, pool_address: Pubkey) {
-        if let Some(chain_indices) = self.chain_references.get(&pool_address) {
-            let offset_4 = self.chain_storage_4.len();
-            
-            for &idx in chain_indices.iter() {
-                if idx < offset_4 {
-                    // Обновляем цепочки длины 4
-                    if let Some(chain) = self.chain_storage_4.get(&idx) {
-                        // Обновляем processed и finalized варианты
-                        self.update_chain(chain.value(), pool_address, false);
-                        self.update_chain(chain.value(), pool_address, true);
-                        debug!("Обновили цепочку длины 4 [{}]", idx);
-                    }
-                } else {
-                    // Обновляем цепочки длины 5
-                    let idx_in_5 = idx - offset_4;
-                    if let Some(chain) = self.chain_storage_5.get(&idx_in_5) {
-                        // Обновляем processed и finalized варианты
-                        self.update_chain(chain.value(), pool_address, false);
-                        self.update_chain(chain.value(), pool_address, true);
-                        debug!("Обновили цепочку длины 5 [{}]", idx_in_5);
-                    }
-                }
-            }
-        }
-    }
-
-    // TODO:
-    // Обновление цепочки с использованием пула, который изменился
-    #[allow(unused_variables)]
-    pub fn update_chain(
-        &self,
-        chain: &[String],
-        pool_address: Pubkey,
-        is_finalized: bool
-    ) -> Option<ChainResult> {
-        debug!(
-            "Updating chain {:?}, trigger pool: {}, finalized={}",
-            chain, pool_address, is_finalized
-        );
-
-        // Выбираем нужный граф
-        let graph_map = if is_finalized {
-            &self.finalized_graph
-        } else {
-            &self.processed_graph
-        };
-
-        let graph = match graph_map.get("main") {
-            Some(g) => g,
-            None => {
-                warn!("Main graph not found (finalized={})", is_finalized);
-                return None;
-            }
-        };
-
-        let mut hops_data = Vec::with_capacity(chain.len() - 1);
-
-        // Проходим по всем парам токенов в цепочке
-        for window in chain.windows(2) {
-            let from_token = &window[0];
-            let to_token = &window[1];
-
-            let mut hop = HopData {
-                from_token: from_token.clone(),
-                to_token: to_token.clone(),
-                pools: Vec::new(),
-                best_pool: None,
-            };
-
-            // Проверяем все DEX для данной пары токенов
-            for dex in [DexType::Orca, DexType::Raydium, DexType::Meteora] {
-                if let Some(pool_pubkey) = self.find_pool_address_by_symbols(dex, from_token, to_token) {
-                    if let Some(edge_idx) = graph.edge_indices()
-                        .find(|&e| graph[e].pool_address == pool_pubkey)
-                    {
-                        let edge = &graph[edge_idx];
-                        if edge.is_active {
-                            hop.pools.push((pool_pubkey, edge.weight));
-                            
-                            // Обновляем best_pool если нужно
-                            if let Some((_, best_weight)) = hop.best_pool {
-                                if edge.weight > best_weight {
-                                    hop.best_pool = Some((pool_pubkey, edge.weight));
-                                }
-                            } else {
-                                hop.best_pool = Some((pool_pubkey, edge.weight));
-                            }
-                        }
-                    }
-                }
-            }
-
-            if hop.pools.is_empty() {
-                warn!("No active pools found for hop {}->{}", from_token, to_token);
-                return None;
-            }
-
-            hops_data.push(hop);
-        }
-
-        let result = ChainResult {
-            last_update: unix_timestamp(),
-            hops: hops_data,
-        };
-
-        // Сохраняем результат в соответствующее хранилище
-        if is_finalized {
-            self.finalized_chain_results.insert(chain.to_vec(), result.clone());
-        } else {
-            self.processed_chain_results.insert(chain.to_vec(), result.clone());
-        }
-
-        Some(result)
     }
 
     // Функция проверки и валидация графов
@@ -1194,8 +1026,11 @@ impl OrcaPoolStateBase {
                 }
             }
             // Обновляем все цепочки, использующие этот пул
-            warn!("Обновляем все цепочки, использующие этот пул");
-            GLOBAL_DATA.update_affected_chains(self.pool_address);
+            // TODO: ВЫЗОВ СТАРОЙ ФУНКЦИИ. ДОБАВИТЬ ТРИГГЕР ПЕРЕСЧЕТА ЦЕПОЧЕК
+            // GLOBAL_DATA.update_affected_chains(self.pool_address);
+
+            // НОВЫЙ ВЫЗОВ:
+            RouterEngine::update_affected_chains(self.pool_address);
         }
         
         updated
@@ -1383,7 +1218,11 @@ impl RaydiumPoolStateBase {
                 }
             }
             // Обновляем все цепочки, использующие этот пул
-            GLOBAL_DATA.update_affected_chains(self.pool_address);
+            // TODO: ВЫЗОВ СТАРОЙ ФУНКЦИИ. ДОБАВИТЬ ТРИГГЕР ПЕРЕСЧЕТА ЦЕПОЧЕК
+            // GLOBAL_DATA.update_affected_chains(self.pool_address);
+
+            // НОВЫЙ ВЫЗОВ:
+            RouterEngine::update_affected_chains(self.pool_address);
         }
         
         updated
@@ -1610,7 +1449,11 @@ impl MeteoraPoolStateBase {
                 }
             }
             // Обновляем все цепочки, использующие этот пул
-            GLOBAL_DATA.update_affected_chains(self.pool_address);
+            // TODO: ВЫЗОВ СТАРОЙ ФУНКЦИИ. ДОБАВИТЬ ТРИГГЕР ПЕРЕСЧЕТА ЦЕПОЧЕК
+            // GLOBAL_DATA.update_affected_chains(self.pool_address);
+
+            // НОВЫЙ ВЫЗОВ:
+            RouterEngine::update_affected_chains(self.pool_address);
         }
         
         updated

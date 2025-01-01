@@ -9,6 +9,7 @@ mod websocket;
 mod shred;
 mod graph;
 mod math;
+mod router;
 
 #[allow(unused_imports)]
 use log::{info, error};
